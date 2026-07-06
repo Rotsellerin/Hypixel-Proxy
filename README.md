@@ -15,18 +15,6 @@ localhost
 
 On first login, the proxy may show a Microsoft link and code. Sign in with the Microsoft account that owns the Minecraft account.
 
-## Sharing Safely
-
-Before sending this project to someone else, do not include these local files:
-
-```text
-state/
-.env
-node_modules/
-dist/
-```
-
-`state/auth-cache` contains Microsoft sign-in tokens for the local user. A clean share zip or GitHub upload should only contain source files, start scripts, package files, tests, README, and `.env.example`.
 
 ## Start
 
