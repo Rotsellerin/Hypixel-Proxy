@@ -1,0 +1,22 @@
+{
+  "name": "hypixel-proxy",
+  "version": "1.0.0",
+  "description": "Minecraft proxy that connects directly to Hypixel and supports local player nicknames.",
+  "main": "dist/index.js",
+  "scripts": {
+    "test": "npm run build && node test/auth-prompt.test.js && node test/nickname-packets.test.js",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "minecraft-protocol": "^1.62.0",
+    "prismarine-auth": "^2.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3"
+  }
+}
