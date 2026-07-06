@@ -6,7 +6,7 @@ state/
 .dotnet-install.ps1
 launcher/**/bin/
 launcher/**/obj/
-app/
+app/*.pdb
 qa-screenshots/
 *.csproj.user
 
