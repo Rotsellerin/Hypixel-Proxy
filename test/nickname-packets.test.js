@@ -92,10 +92,31 @@ assert.ok(writes.some(write => write.name === 'scoreboard_score' && write.params
 assert.ok(writes.some(write => write.name === 'entity_destroy' && write.params.entityIds.includes(7)))
 assert.ok(writes.some(write => write.name === 'named_entity_spawn' && write.params.entityId === 7 && write.params.playerUUID === playerInfo.data[0].uuid))
 
-assert.equal(__test.lobbyCommandKey('/l'), '/l')
-assert.equal(__test.lobbyCommandKey('  /L  '), '/l')
-assert.equal(__test.lobbyCommandKey('/lobby bedwars'), '/lobby bedwars')
-assert.equal(__test.lobbyCommandKey('/hub'), '/hub')
-assert.equal(__test.lobbyCommandKey('/leave'), '/leave')
+assert.equal(__test.lobbyCommandKey('/l'), 'lobby')
+assert.equal(__test.lobbyCommandKey('  /L  '), 'lobby')
+assert.equal(__test.lobbyCommandKey('/lobby bedwars'), 'lobby:bedwars')
+assert.equal(__test.lobbyCommandKey('/bedwars'), 'lobby:bedwars')
+assert.equal(__test.lobbyCommandKey('/bw'), 'lobby:bedwars')
+assert.equal(__test.lobbyCommandKey('/lobby duels'), 'lobby:duels')
+assert.equal(__test.lobbyCommandKey('/duels'), 'lobby:duels')
+assert.equal(__test.lobbyCommandKey('/hub'), 'lobby')
+assert.equal(__test.lobbyCommandKey('/leave'), 'lobby')
 assert.equal(__test.lobbyCommandKey('/msg friend hello'), null)
 assert.equal(__test.lobbyCommandKey('/play bedwars_four_four'), null)
+
+assert.equal(__test.cleanWindowTitle('{"text":"§aGame Menu"}'), 'Game Menu')
+assert.equal(__test.isLobbySelectorWindowTitle('{"text":"Game Menu"}'), true)
+assert.equal(__test.isLobbySelectorWindowTitle('{"text":"Lobby Selector"}'), true)
+assert.equal(__test.isLobbySelectorWindowTitle('{"text":"Bed Wars Shop"}'), false)
+assert.equal(
+  __test.lobbyWindowClickKey({ windowId: 4, slot: 11, mouseButton: 0, action: 22, mode: 0 }),
+  __test.lobbyWindowClickKey({ windowId: 4, slot: 11, mouseButton: 0, action: 23, mode: 0 })
+)
+assert.notEqual(
+  __test.lobbyWindowClickKey({ windowId: 4, slot: 11, mouseButton: 0, mode: 0 }),
+  __test.lobbyWindowClickKey({ windowId: 4, slot: 12, mouseButton: 0, mode: 0 })
+)
+assert.equal(__test.shouldRawForwardUpstreamPacket('map_chunk'), true)
+assert.equal(__test.shouldRawForwardUpstreamPacket('map_chunk_bulk'), true)
+assert.equal(__test.shouldRawForwardUpstreamPacket('chat'), false)
+assert.equal(__test.shouldRawForwardUpstreamPacket('title'), false)

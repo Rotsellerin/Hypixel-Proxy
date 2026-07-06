@@ -72,6 +72,10 @@ type LocalTeamSnapshot = {
   teams: TeamState[]
   playersByKey: Map<string, string>
 }
+type TransferWatchState = {
+  active: boolean
+  expiresAt: number
+}
 
 loadDotEnv(path.join(process.cwd(), '.env'))
 
@@ -105,6 +109,9 @@ const BEDWARS_ROSTER_SETTLE_MS = 4000
 const MAX_BEDWARS_TEAM_PLAYERS = 4
 const SPLIT_PRE_RESPAWN_GRACE_MS = 2500
 const LOBBY_COMMAND_DEDUPE_MS = 2500
+const RAW_FORWARD_UPSTREAM_PACKETS = new Set(['map_chunk', 'map_chunk_bulk'])
+const TRANSFER_WATCH_MS = 20000
+const SCOREBOARD_ANALYSIS_THROTTLE_MS = 500
 
 const colors = {
   reset: '\x1b[0m',
@@ -1718,14 +1725,78 @@ function parseNicknameCommand(message: string): { player: string; nickname: stri
   return { player: match[1], nickname }
 }
 
+const LOBBY_COMMAND_ALIASES: Record<string, string> = {
+  '/arcade': 'arcade',
+  '/bb': 'buildbattle',
+  '/bedwars': 'bedwars',
+  '/blitz': 'blitz',
+  '/buildbattle': 'buildbattle',
+  '/bw': 'bedwars',
+  '/cac': 'copsandcrims',
+  '/classic': 'classic',
+  '/copsandcrims': 'copsandcrims',
+  '/duels': 'duels',
+  '/housing': 'housing',
+  '/main': 'main',
+  '/megawalls': 'megawalls',
+  '/mm': 'murdermystery',
+  '/murdermystery': 'murdermystery',
+  '/pit': 'pit',
+  '/prototype': 'prototype',
+  '/quake': 'quake',
+  '/skywars': 'skywars',
+  '/smash': 'smash',
+  '/speeduhc': 'speeduhc',
+  '/sw': 'skywars',
+  '/tntgames': 'tntgames',
+  '/uhc': 'uhc',
+  '/vampirez': 'vampirez',
+  '/warlords': 'warlords',
+  '/walls': 'walls'
+}
+
+const LOBBY_GUI_CLICK_DEDUPE_MS = 1200
+
+function cleanWindowTitle(title: unknown): string {
+  return stripColors(flattenChatToText(title)).trim().replace(/\s+/g, ' ')
+}
+
+function isLobbySelectorWindowTitle(title: unknown): boolean {
+  const clean = cleanWindowTitle(title).toLowerCase()
+  return /\bgame menu\b/.test(clean)
+    || /\blobby selector\b/.test(clean)
+    || /\bserver selector\b/.test(clean)
+    || /\bplay games\b/.test(clean)
+    || /\bquick join\b/.test(clean)
+}
+
+function lobbyWindowClickKey(data: any): string {
+  const windowId = Number(data?.windowId ?? data?.id ?? -1)
+  const slot = Number(data?.slot ?? -1)
+  const mouseButton = Number(data?.mouseButton ?? data?.button ?? -1)
+  const mode = Number(data?.mode ?? -1)
+  return `${windowId}:${slot}:${mouseButton}:${mode}`
+}
+
 function lobbyCommandKey(message: string): string | null {
   const clean = stripColors(message).trim().replace(/\s+/g, ' ').toLowerCase()
-  if (/^\/(?:l|leave|lobby|hub)(?:\s|$)/.test(clean)) return clean
+  const [command = '', firstArg = ''] = clean.split(' ')
+
+  if (command === '/l' || command === '/leave' || command === '/hub') return 'lobby'
+  if (command === '/lobby') return firstArg ? `lobby:${firstArg}` : 'lobby'
+
+  const alias = LOBBY_COMMAND_ALIASES[command]
+  if (alias) return `lobby:${alias}`
+
   return null
 }
 
-function lobbyCommandName(commandKey: string): string {
-  return commandKey.split(/\s+/)[0] || '/l'
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function shouldRawForwardUpstreamPacket(packetName: string): boolean {
+  return RAW_FORWARD_UPSTREAM_PACKETS.has(packetName)
 }
 
 function bridgeLogin(upstream: Client, downstream: ServerClient) {
@@ -1753,11 +1824,70 @@ function bridgePlay(
 ) {
   let lastLobbyCommandKey = ''
   let lastLobbyCommandAt = 0
+  let currentWindowId = -1
+  let currentWindowTitle = ''
+  let currentWindowIsLobbySelector = false
+  let lastLobbyWindowClickKey = ''
+  let lastLobbyWindowClickAt = 0
+  let lastScoreboardAnalysisAt = 0
+  let scoreboardAnalysisDeferred = false
+  const transferWatch: TransferWatchState = {
+    active: false,
+    expiresAt: 0
+  }
+
+  const startTransferWatch = () => {
+    transferWatch.active = true
+    transferWatch.expiresAt = Date.now() + TRANSFER_WATCH_MS
+  }
+
+  const isTransferActive = () => {
+    const now = Date.now()
+    if (transferWatch.active && now > transferWatch.expiresAt) {
+      transferWatch.active = false
+    }
+    return transferWatch.active
+  }
+
+  const analyzeScoreboard = (force = false) => {
+    if (!appConfig.splitReminder.enabled) return
+    if (isTransferActive()) {
+      scoreboardAnalysisDeferred = true
+      return
+    }
+
+    const now = Date.now()
+    if (!force && !scoreboardAnalysisDeferred && now - lastScoreboardAnalysisAt < SCOREBOARD_ANALYSIS_THROTTLE_MS) return
+    lastScoreboardAnalysisAt = now
+
+    scoreboardAnalysisDeferred = false
+    const mode = updateBedWarsModeFromScoreboard(sessionState, splitReminderState)
+    logBedWarsModeIfChanged(splitReminderState, mode)
+    logLocalTeamIfChanged(sessionState, downstream.username, splitReminderState)
+  }
+
+  upstream.on('raw', (buffer: Buffer, meta: any) => {
+    if (upstream.state !== 'play' || downstream.state !== 'play') return
+    const packetName = String(meta?.name || '')
+    if (!shouldRawForwardUpstreamPacket(packetName)) return
+
+    try {
+      downstream.writeRaw(buffer)
+      startTransferWatch()
+    } catch (error) {
+      term('Bridge', `Dropped raw upstream packet ${String(meta?.name || 'unknown')}: ${errorMessage(error)}`, colors.red)
+    }
+  })
 
   upstream.on('packet', (data, meta) => {
     if (upstream.state !== 'play' || downstream.state !== 'play') return
+    if (shouldRawForwardUpstreamPacket(meta.name)) return
 
     try {
+      if (meta.name === 'login' || meta.name === 'respawn') {
+        startTransferWatch()
+      }
+
       if (meta.name === 'chat') {
         const raw = (data as any).message
         const position = (data as any).position ?? 0
@@ -1836,6 +1966,27 @@ function bridgePlay(
         return
       }
 
+      if (meta.name === 'open_window') {
+        currentWindowId = Number((data as any).windowId ?? (data as any).id ?? -1)
+        currentWindowTitle = cleanWindowTitle((data as any).windowTitle ?? (data as any).title ?? '')
+        currentWindowIsLobbySelector = isLobbySelectorWindowTitle(currentWindowTitle)
+        downstream.write(meta.name, data)
+        return
+      }
+
+      if (meta.name === 'close_window') {
+        const windowId = Number((data as any).windowId ?? (data as any).id ?? -1)
+        if (windowId === currentWindowId || windowId === -1) {
+          currentWindowId = -1
+          currentWindowTitle = ''
+          currentWindowIsLobbySelector = false
+          lastLobbyWindowClickKey = ''
+          lastLobbyWindowClickAt = 0
+        }
+        downstream.write(meta.name, data)
+        return
+      }
+
       if (meta.name === 'player_info') {
         trackPlayerInfo(data, sessionState)
         downstream.write(meta.name, withNicknamePlayerInfo(data, nicknames))
@@ -1844,20 +1995,14 @@ function bridgePlay(
 
       if (meta.name === 'scoreboard_team' || meta.name === 'teams') {
         trackScoreboardTeam(meta.name, data, sessionState, nicknames)
-        const mode = updateBedWarsModeFromScoreboard(sessionState, splitReminderState)
-        logBedWarsModeIfChanged(splitReminderState, mode)
-        logLocalTeamIfChanged(sessionState, downstream.username, splitReminderState)
+        analyzeScoreboard()
         downstream.write(meta.name, withNicknameScoreboardTeam(data, nicknames))
         return
       }
 
       if (meta.name === 'scoreboard_score') {
         trackScoreboardScore(data, sessionState)
-        const mode = updateBedWarsModeFromScoreboard(sessionState, splitReminderState)
-        if (mode) {
-          logBedWarsModeIfChanged(splitReminderState, mode)
-          logLocalTeamIfChanged(sessionState, downstream.username, splitReminderState)
-        }
+        analyzeScoreboard()
         downstream.write(meta.name, withNicknameScoreboardScore(data, nicknames))
         return
       }
@@ -1907,7 +2052,9 @@ function bridgePlay(
       }
 
       downstream.write(meta.name, data)
-    } catch {}
+    } catch (error) {
+      term('Bridge', `Dropped upstream packet ${meta.name}: ${errorMessage(error)}`, colors.red)
+    }
   })
 
   downstream.on('packet', (data, meta) => {
@@ -1965,26 +2112,46 @@ function bridgePlay(
       if (commandKey) {
         const now = Date.now()
         if (lastLobbyCommandKey === commandKey && now - lastLobbyCommandAt < LOBBY_COMMAND_DEDUPE_MS) {
-          term('Local', `Suppressed duplicate lobby command ${lobbyCommandName(commandKey)}.`, colors.gray)
           return
         }
         lastLobbyCommandKey = commandKey
         lastLobbyCommandAt = now
+        startTransferWatch()
+      }
+    }
+
+    if (meta.name === 'window_click') {
+      const windowId = Number((data as any).windowId ?? (data as any).id ?? -1)
+      const isCurrentLobbyWindow = currentWindowIsLobbySelector && windowId === currentWindowId
+      if (isCurrentLobbyWindow) {
+        const now = Date.now()
+        const clickKey = lobbyWindowClickKey(data)
+        if (lastLobbyWindowClickKey === clickKey && now - lastLobbyWindowClickAt < LOBBY_GUI_CLICK_DEDUPE_MS) {
+          return
+        }
+        lastLobbyWindowClickKey = clickKey
+        lastLobbyWindowClickAt = now
+        startTransferWatch()
       }
     }
 
     try {
       upstream.write(meta.name, data)
-    } catch {}
+    } catch (error) {
+      term('Bridge', `Dropped downstream packet ${meta.name}: ${errorMessage(error)}`, colors.red)
+    }
   })
 }
 
 export const __test = {
   createSplitReminderState,
   createSessionState,
+  cleanWindowTitle,
   deathPlayerName,
   isLocalTeammateDeathText,
+  isLobbySelectorWindowTitle,
   lobbyCommandKey,
+  lobbyWindowClickKey,
   localPlayerTeam,
   localTeammateNames,
   refreshLocalNicknames,
@@ -1998,6 +2165,7 @@ export const __test = {
   withSplitReminderUnknownPacket,
   forcedSplitTitlePacket,
   packetHasRespawnedTitleText,
+  shouldRawForwardUpstreamPacket,
   withNicknameEntityMetadata,
   withNicknameNamedEntitySpawn,
   withNicknamePlayerInfo,

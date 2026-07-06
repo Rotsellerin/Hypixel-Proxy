@@ -29,6 +29,7 @@ public sealed class MainForm : Form
     private const int MainHeight = 276;
     private const int MaxContentWidth = 1180;
     private const int MaxContentHeight = 820;
+    private const int MissedStatusPollsBeforeStopped = 80;
 
     private readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(2) };
     private readonly System.Windows.Forms.Timer refreshTimer = new() { Interval = 1500 };
@@ -38,6 +39,8 @@ public sealed class MainForm : Form
 
     private ProxyStatus? lastStatus;
     private Process? proxyProcess;
+    private int missedStatusPolls;
+    private bool refreshInFlight;
     private bool routeChanging;
     private bool splitChanging;
     private bool closingConfirmed;
@@ -562,9 +565,36 @@ public sealed class MainForm : Form
 
     private async Task RefreshStatusAsync()
     {
-        var status = await TryGetStatusAsync();
-        lastStatus = status;
-        RenderStatus(status);
+        if (refreshInFlight) return;
+        refreshInFlight = true;
+
+        try
+        {
+            var status = await TryGetStatusAsync();
+            if (status is not null)
+            {
+                missedStatusPolls = 0;
+                lastStatus = status;
+                RenderStatus(status);
+                return;
+            }
+
+            missedStatusPolls++;
+            if (lastStatus is not null && (lastStatus.ActiveSessions > 0 || missedStatusPolls < MissedStatusPollsBeforeStopped))
+            {
+                RenderStatus(lastStatus);
+                statusBadge.SetState(routeChanging ? "Restarting" : "Reconnecting", true);
+                routingHint.Text = routeChanging ? "Restarting proxy..." : "Control API reconnecting...";
+                return;
+            }
+
+            lastStatus = null;
+            RenderStatus(null);
+        }
+        finally
+        {
+            refreshInFlight = false;
+        }
     }
 
     private void RenderStatus(ProxyStatus? status)
@@ -792,6 +822,7 @@ public sealed class MainForm : Form
             var status = await TryGetStatusAsync();
             if (status is not null)
             {
+                missedStatusPolls = 0;
                 lastStatus = status;
                 RenderStatus(status);
                 return;
@@ -833,6 +864,7 @@ public sealed class MainForm : Form
             }
         }
 
+        missedStatusPolls = 0;
         lastStatus = null;
         RenderStatus(null);
     }
