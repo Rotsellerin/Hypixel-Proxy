@@ -1,0 +1,18 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <AssemblyName>Hypixel Proxy</AssemblyName>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationIcon>Assets\hypixel-proxy-logo.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\hypixel-proxy-logo.png" LogicalName="HypixelProxy.App.Assets.HypixelProxyLogo.png" />
+    <EmbeddedResource Include="Assets\hypixel-proxy-logo.ico" LogicalName="HypixelProxy.App.Assets.HypixelProxyLogo.ico" />
+  </ItemGroup>
+
+</Project>

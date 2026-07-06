@@ -2,6 +2,13 @@ node_modules/
 dist/
 state/
 .env
+.dotnet/
+.dotnet-install.ps1
+launcher/**/bin/
+launcher/**/obj/
+app/
+qa-screenshots/
+*.csproj.user
 
 npm-debug.log*
 *.log
