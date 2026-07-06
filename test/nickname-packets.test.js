@@ -91,3 +91,11 @@ assert.ok(writes.some(write => write.name === 'scoreboard_team' && write.params.
 assert.ok(writes.some(write => write.name === 'scoreboard_score' && write.params.itemName === 'Bollen' && write.params.scoreName === 'health' && write.params.value === 20))
 assert.ok(writes.some(write => write.name === 'entity_destroy' && write.params.entityIds.includes(7)))
 assert.ok(writes.some(write => write.name === 'named_entity_spawn' && write.params.entityId === 7 && write.params.playerUUID === playerInfo.data[0].uuid))
+
+assert.equal(__test.lobbyCommandKey('/l'), '/l')
+assert.equal(__test.lobbyCommandKey('  /L  '), '/l')
+assert.equal(__test.lobbyCommandKey('/lobby bedwars'), '/lobby bedwars')
+assert.equal(__test.lobbyCommandKey('/hub'), '/hub')
+assert.equal(__test.lobbyCommandKey('/leave'), '/leave')
+assert.equal(__test.lobbyCommandKey('/msg friend hello'), null)
+assert.equal(__test.lobbyCommandKey('/play bedwars_four_four'), null)

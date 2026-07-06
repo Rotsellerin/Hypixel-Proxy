@@ -208,6 +208,13 @@ assert.deepEqual(
   __test.localTeammateNames(persistentSession, localPlayer, persistentState),
   ['bloon_popper_380', 'galenballe', localPlayer]
 )
+assert.equal(__test.isLocalTeammateDeathText(
+  'bloon_popper_380 fell into the void.',
+  settings,
+  persistentSession,
+  localPlayer,
+  persistentState
+).match, true)
 __test.withSplitReminderChatComponent(
   { text: 'You will respawn in 5 seconds!' },
   persistentState,
@@ -701,6 +708,48 @@ __test.withSplitReminderChatComponent(
 )
 assert.equal(localDeathState.respawning, false)
 assert.equal(localDeathState.splitPending, false)
+
+const earlyTeammateDeathState = __test.createSplitReminderState()
+markGameStarted(earlyTeammateDeathState)
+__test.withSplitReminderChatComponent(
+  { text: 'galenballe fell into the void.' },
+  earlyTeammateDeathState,
+  settings,
+  900,
+  splitContext(session)
+)
+assert.equal(earlyTeammateDeathState.splitPending, false)
+__test.withSplitReminderChatComponent(
+  { text: 'You will respawn in 5 seconds!' },
+  earlyTeammateDeathState,
+  settings,
+  1000,
+  splitContext(session)
+)
+assert.equal(earlyTeammateDeathState.splitPending, true)
+assert.match(earlyTeammateDeathState.lastTrigger, /galenballe fell into the void/)
+const earlyTitlePacket = __test.withSplitReminderPacket('title', {
+  text: JSON.stringify({ text: 'RESPAWNED!', color: 'green' })
+}, earlyTeammateDeathState, settings, 2000)
+assert.deepEqual(JSON.parse(earlyTitlePacket.text), { text: 'SPLIT!', color: 'green' })
+
+const staleEarlyDeathState = __test.createSplitReminderState()
+markGameStarted(staleEarlyDeathState)
+__test.withSplitReminderChatComponent(
+  { text: 'galenballe fell into the void.' },
+  staleEarlyDeathState,
+  settings,
+  1000,
+  splitContext(session)
+)
+__test.withSplitReminderChatComponent(
+  { text: 'You will respawn in 5 seconds!' },
+  staleEarlyDeathState,
+  settings,
+  5000,
+  splitContext(session)
+)
+assert.equal(staleEarlyDeathState.splitPending, false)
 
 const missingTeamLogs = []
 const missingTeamState = __test.createSplitReminderState()

@@ -42,6 +42,8 @@ type SplitReminderState = {
   respawning: boolean
   splitPending: boolean
   lastTrigger: string
+  preRespawnTrigger: string
+  preRespawnTriggerAt: number
   lastTeamSignature: string
   stableTeamColorName: string
   stableTeamPlayersByKey: Map<string, string>
@@ -101,6 +103,8 @@ const VERSION_LABEL = (() => {
 })()
 const BEDWARS_ROSTER_SETTLE_MS = 4000
 const MAX_BEDWARS_TEAM_PLAYERS = 4
+const SPLIT_PRE_RESPAWN_GRACE_MS = 2500
+const LOBBY_COMMAND_DEDUPE_MS = 2500
 
 const colors = {
   reset: '\x1b[0m',
@@ -339,6 +343,8 @@ function createSplitReminderState(): SplitReminderState {
     respawning: false,
     splitPending: false,
     lastTrigger: '',
+    preRespawnTrigger: '',
+    preRespawnTriggerAt: 0,
     lastTeamSignature: '',
     stableTeamColorName: '',
     stableTeamPlayersByKey: new Map(),
@@ -355,6 +361,8 @@ function resetSplitReminderMatchState(state: SplitReminderState, bedWarsGameActi
   state.respawning = false
   state.splitPending = false
   state.lastTrigger = ''
+  state.preRespawnTrigger = ''
+  state.preRespawnTriggerAt = 0
   state.lastTeamSignature = ''
   state.stableTeamColorName = ''
   state.stableTeamPlayersByKey.clear()
@@ -872,6 +880,14 @@ function isLocalTeammateDeathText(
     return { match: false, player, reason: 'no_team' }
   }
 
+  if (splitState?.bedWarsGameActive && splitState.stableTeamPlayersByKey.has(playerKey(player))) {
+    const cachedTeam = cachedLocalTeamSnapshot(splitState)
+    const teammates = cachedTeam
+      ? localTeamPlayerNames(cachedTeam)
+      : Array.from(splitState.stableTeamPlayersByKey.values()).sort((a, b) => a.localeCompare(b))
+    return { match: true, player, team: cachedTeam?.primaryTeam, teammates }
+  }
+
   const localTeam = localPlayerTeamSnapshot(sessionState, localPlayerName, splitState, now)
   if (!localTeam) return { match: false, player, reason: 'no_team' }
   const teammates = localTeamPlayerNames(localTeam)
@@ -921,16 +937,23 @@ function withSplitReminderChatComponent(
   }
 
   if (isLocalRespawnCountdownText(text)) {
+    const preRespawnTriggerIsFresh =
+      !!state.preRespawnTrigger &&
+      now - state.preRespawnTriggerAt <= SPLIT_PRE_RESPAWN_GRACE_MS
     if (!state.respawning) {
-      state.splitPending = false
-      state.lastTrigger = ''
+      state.splitPending = preRespawnTriggerIsFresh
+      state.lastTrigger = preRespawnTriggerIsFresh ? state.preRespawnTrigger : ''
     }
+    state.preRespawnTrigger = ''
+    state.preRespawnTriggerAt = 0
     state.respawning = true
     return comp
   }
 
   if (isLocalRespawnCompleteText(text)) {
     state.respawning = false
+    state.preRespawnTrigger = ''
+    state.preRespawnTriggerAt = 0
     return comp
   }
 
@@ -942,8 +965,8 @@ function withSplitReminderChatComponent(
     return comp
   }
 
-  if (state.respawning) {
-    const teammateDeath = isLocalTeammateDeathText(
+  const teammateDeath = isTeammateDeathText(text, settings)
+    ? isLocalTeammateDeathText(
       text,
       settings,
       context.sessionState,
@@ -951,10 +974,14 @@ function withSplitReminderChatComponent(
       state,
       now
     )
+    : { match: false } as TeammateDeathResult
 
+  if (state.respawning) {
     if (teammateDeath.match) {
       state.splitPending = true
       state.lastTrigger = text
+      state.preRespawnTrigger = ''
+      state.preRespawnTriggerAt = 0
       return comp
     }
 
@@ -970,6 +997,11 @@ function withSplitReminderChatComponent(
       context.log?.(`Ignored split trigger from ${teammateDeath.player}; local team not detected.`)
       return comp
     }
+  }
+
+  if (teammateDeath.match) {
+    state.preRespawnTrigger = text
+    state.preRespawnTriggerAt = now
   }
 
   return comp
@@ -990,6 +1022,8 @@ function withSplitReminderTitleComponent(
   state.splitPending = false
   state.respawning = false
   state.lastTrigger = ''
+  state.preRespawnTrigger = ''
+  state.preRespawnTriggerAt = 0
 
   return shouldSplit ? replaceRespawnedInTitle(comp, settings) : comp
 }
@@ -1183,6 +1217,8 @@ function withSplitReminderUnknownPacket(
     state.splitPending = false
     state.respawning = false
     state.lastTrigger = ''
+    state.preRespawnTrigger = ''
+    state.preRespawnTriggerAt = 0
   }
   return { packet: rewritten.value, changed: rewritten.changed }
 }
@@ -1682,6 +1718,16 @@ function parseNicknameCommand(message: string): { player: string; nickname: stri
   return { player: match[1], nickname }
 }
 
+function lobbyCommandKey(message: string): string | null {
+  const clean = stripColors(message).trim().replace(/\s+/g, ' ').toLowerCase()
+  if (/^\/(?:l|leave|lobby|hub)(?:\s|$)/.test(clean)) return clean
+  return null
+}
+
+function lobbyCommandName(commandKey: string): string {
+  return commandKey.split(/\s+/)[0] || '/l'
+}
+
 function bridgeLogin(upstream: Client, downstream: ServerClient) {
   upstream.on('packet', (data, meta) => {
     if (upstream.state !== 'login' || downstream.state !== 'login') return
@@ -1705,6 +1751,9 @@ function bridgePlay(
   sessionState: SessionState,
   splitReminderState: SplitReminderState
 ) {
+  let lastLobbyCommandKey = ''
+  let lastLobbyCommandAt = 0
+
   upstream.on('packet', (data, meta) => {
     if (upstream.state !== 'play' || downstream.state !== 'play') return
 
@@ -1771,6 +1820,8 @@ function bridgePlay(
             splitReminderState.splitPending = false
             splitReminderState.respawning = false
             splitReminderState.lastTrigger = ''
+            splitReminderState.preRespawnTrigger = ''
+            splitReminderState.preRespawnTriggerAt = 0
             term('QoL', `Split title forced from ${trigger || 'teammate death'} via ${meta.name}.`, colors.yellow)
             downstream.write(meta.name, forced)
             return
@@ -1909,6 +1960,17 @@ function bridgePlay(
         sendClientChat(downstream, infoChat('Usage: /nickname <player> "nickname"'))
         return
       }
+
+      const commandKey = lobbyCommandKey(message)
+      if (commandKey) {
+        const now = Date.now()
+        if (lastLobbyCommandKey === commandKey && now - lastLobbyCommandAt < LOBBY_COMMAND_DEDUPE_MS) {
+          term('Local', `Suppressed duplicate lobby command ${lobbyCommandName(commandKey)}.`, colors.gray)
+          return
+        }
+        lastLobbyCommandKey = commandKey
+        lastLobbyCommandAt = now
+      }
     }
 
     try {
@@ -1922,6 +1984,7 @@ export const __test = {
   createSessionState,
   deathPlayerName,
   isLocalTeammateDeathText,
+  lobbyCommandKey,
   localPlayerTeam,
   localTeammateNames,
   refreshLocalNicknames,
