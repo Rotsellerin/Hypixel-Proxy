@@ -610,6 +610,76 @@ __test.trackScoreboardTeam('scoreboard_team', {
 }, doublesSession, new Map())
 assert.deepEqual(__test.localTeammateNames(doublesSession, localPlayer, doublesState, 6000), ['kekokoa', localPlayer])
 
+const tabLetterSession = __test.createSessionState()
+const tabLetterState = __test.createSplitReminderState()
+setModeText(tabLetterState, 'Mode: 4v4v4v4')
+markGameStarted(tabLetterState)
+__test.trackScoreboardTeam('scoreboard_team', {
+  team: 'yellow-local',
+  mode: 0,
+  prefix: '\u00a7eY ',
+  players: [localPlayer]
+}, tabLetterSession, new Map())
+__test.trackScoreboardTeam('scoreboard_team', {
+  team: 'yellow-one',
+  mode: 0,
+  prefix: '\u00a7eY ',
+  players: ['HasanSyed22']
+}, tabLetterSession, new Map())
+__test.trackScoreboardTeam('scoreboard_team', {
+  team: 'yellow-two',
+  mode: 0,
+  prefix: '\u00a7eY ',
+  players: ['Lambo67', 'raskolnikov333']
+}, tabLetterSession, new Map())
+__test.trackScoreboardTeam('scoreboard_team', {
+  team: 'same-color-wrong-letter',
+  mode: 0,
+  prefix: '\u00a7eR ',
+  players: ['FakeYellowEnemy']
+}, tabLetterSession, new Map())
+assert.deepEqual(
+  __test.localTeammateNames(tabLetterSession, localPlayer, tabLetterState, 5000),
+  ['HasanSyed22', 'Lambo67', 'raskolnikov333', localPlayer]
+)
+assert.equal(__test.isLocalTeammateDeathText(
+  'Lambo67 fell into the void.',
+  settings,
+  tabLetterSession,
+  localPlayer,
+  tabLetterState
+).match, true)
+assert.equal(__test.isLocalTeammateDeathText(
+  'FakeYellowEnemy fell into the void.',
+  settings,
+  tabLetterSession,
+  localPlayer,
+  tabLetterState
+).match, false)
+
+const tabDisplaySession = __test.createSessionState()
+const tabDisplayState = __test.createSplitReminderState()
+setModeText(tabDisplayState, 'Mode: 4v4v4v4')
+markGameStarted(tabDisplayState)
+__test.trackScoreboardTeam('scoreboard_team', {
+  team: 'display-local',
+  mode: 0,
+  prefix: '',
+  players: [localPlayer]
+}, tabDisplaySession, new Map())
+__test.trackPlayerInfo({
+  action: 'add_player',
+  data: [
+    { uuid: '00000000-0000-0000-0000-000000000001', name: localPlayer, displayName: JSON.stringify({ text: `Y ${localPlayer}` }) },
+    { uuid: '00000000-0000-0000-0000-000000000002', name: 'DisplayMate', displayName: JSON.stringify({ text: 'Y DisplayMate' }) },
+    { uuid: '00000000-0000-0000-0000-000000000003', name: 'DisplayEnemy', displayName: JSON.stringify({ text: 'R DisplayEnemy' }) }
+  ]
+}, tabDisplaySession)
+assert.deepEqual(
+  __test.localTeammateNames(tabDisplaySession, localPlayer, tabDisplayState, 5000),
+  ['DisplayMate', localPlayer]
+)
+
 const nextGameSession = sessionWithSplitColorTeams()
 const nextGameState = __test.createSplitReminderState()
 markGameStarted(nextGameState)

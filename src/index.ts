@@ -118,6 +118,16 @@ const VERSION_LABEL = (() => {
 const BEDWARS_ROSTER_SETTLE_MS = 4000
 const MAX_BEDWARS_TEAM_PLAYERS = 4
 const SPLIT_PRE_RESPAWN_GRACE_MS = 2500
+const BEDWARS_TAB_TEAM_LETTERS: Record<string, string> = {
+  R: 'Red',
+  B: 'Blue',
+  G: 'Green',
+  Y: 'Yellow',
+  A: 'Aqua',
+  W: 'White',
+  P: 'Pink',
+  S: 'Gray'
+}
 const LOBBY_COMMAND_DEDUPE_MS = 2500
 const RAW_FORWARD_UPSTREAM_PACKETS = new Set(['map_chunk', 'map_chunk_bulk'])
 const TRANSFER_WATCH_MS = 20000
@@ -558,6 +568,59 @@ function addLocalTeamPlayer(playersByKey: Map<string, string>, playerName: strin
   playersByKey.set(playerKey(clean), clean)
 }
 
+function bedWarsTabTeamLetterFromText(text: string): string | null {
+  const clean = stripColors(text).replace(/\s+/g, ' ').trim()
+  if (!clean) return null
+
+  const match = /(?:^|[^A-Za-z0-9_])([RBGYAWPS])(?:$|[^A-Za-z0-9_])/i.exec(clean)
+  return match ? match[1].toUpperCase() : null
+}
+
+function bedWarsTabTeamLetter(team: TeamState): string | null {
+  return bedWarsTabTeamLetterFromText(team.prefix || '')
+    || bedWarsTabTeamLetterFromText(team.suffix || '')
+    || bedWarsTabTeamLetterFromText(team.team || '')
+}
+
+function bedWarsTabTeamName(team: TeamState): string | null {
+  const letter = bedWarsTabTeamLetter(team)
+  return letter ? BEDWARS_TAB_TEAM_LETTERS[letter] || null : null
+}
+
+function playerDisplayText(player: any): string {
+  if (!player || typeof player !== 'object' || player.displayName == null) return ''
+  return stripColors(flattenChatToText(player.displayName)).replace(/\s+/g, ' ').trim()
+}
+
+function bedWarsTabTeamLetterFromPlayerInfo(player: any): string | null {
+  const name = typeof player?.name === 'string' ? player.name : ''
+  const display = playerDisplayText(player)
+  if (!display) return null
+
+  if (validPlayerName(name)) {
+    const match = new RegExp(`(?:^|[^A-Za-z0-9_])([RBGYAWPS])\\s+${escapeRegExp(name)}(?:$|[^A-Za-z0-9_])`, 'i').exec(display)
+    if (match) return match[1].toUpperCase()
+  }
+
+  return bedWarsTabTeamLetterFromText(display)
+}
+
+function addLocalTeamPlayersFromTabLetter(
+  state: SessionState,
+  playersByKey: Map<string, string>,
+  letter: string
+) {
+  for (const team of state.teams.values()) {
+    if (bedWarsTabTeamLetter(team) !== letter) continue
+    for (const player of team.players) addLocalTeamPlayer(playersByKey, player)
+  }
+
+  for (const player of state.playersByName.values()) {
+    if (bedWarsTabTeamLetterFromPlayerInfo(player) !== letter) continue
+    if (typeof player?.name === 'string') addLocalTeamPlayer(playersByKey, player.name)
+  }
+}
+
 function localPlayerTeamCandidates(state: SessionState, localPlayerName: string): TeamState[] {
   const teams = Array.from(state.teams.values()).filter(team => teamHasPlayer(team, localPlayerName))
   if (!teams.length) return []
@@ -677,14 +740,24 @@ function localPlayerTeamSnapshotForCandidate(
   localPlayerName: string,
   primaryTeam: TeamState
 ): LocalTeamSnapshot {
-  const colorName = teamColorName(primaryTeam) || playerStateColorName(state, localPlayerName)
-  const teams = colorName
-    ? Array.from(state.teams.values()).filter(team => teamIncludesColorName(state, team, colorName))
-    : [primaryTeam]
+  const tabLetter = bedWarsTabTeamLetter(primaryTeam)
+    || bedWarsTabTeamLetterFromPlayerInfo(state.playersByName.get(playerKey(localPlayerName)))
+  const colorName = (tabLetter ? BEDWARS_TAB_TEAM_LETTERS[tabLetter] || null : null)
+    || teamColorName(primaryTeam)
+    || playerStateColorName(state, localPlayerName)
+  const teams = tabLetter
+    ? Array.from(state.teams.values()).filter(team => bedWarsTabTeamLetter(team) === tabLetter)
+    : colorName
+      ? Array.from(state.teams.values()).filter(team => teamIncludesColorName(state, team, colorName))
+      : [primaryTeam]
   const playersByKey = new Map<string, string>()
 
-  for (const team of teams) {
-    addLocalTeamPlayersFromTeam(state, playersByKey, team, colorName)
+  if (tabLetter) {
+    addLocalTeamPlayersFromTabLetter(state, playersByKey, tabLetter)
+  } else {
+    for (const team of teams) {
+      addLocalTeamPlayersFromTeam(state, playersByKey, team, colorName)
+    }
   }
 
   addLocalTeamPlayer(playersByKey, localPlayerName)
@@ -1583,6 +1656,9 @@ function trackScoreboardTeam(packetName: string, packet: any, state: SessionStat
 }
 
 function teamColorName(team: TeamState): string | null {
+  const tabTeam = bedWarsTabTeamName(team)
+  if (tabTeam) return tabTeam
+
   const text = `${team.team} ${team.prefix} ${team.suffix}`
   const legacy = legacyColorName(text)
   if (legacy) return legacy
