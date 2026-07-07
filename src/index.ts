@@ -1,6 +1,7 @@
 import mc, { Client, Server, ServerClient, ServerOptions } from 'minecraft-protocol'
 import fs from 'fs'
 import path from 'path'
+import crypto from 'crypto'
 import { AppConfig, RouteId, SplitReminderSettings, UpstreamRoute, createRouteCatalog, loadAppConfig, normalizeAppConfig, normalizeSplitReminderSettings, routeById, saveAppConfig } from './appConfig'
 import { startDashboard } from './dashboard'
 import { MsaCode, microsoftAuthPrompt } from './microsoftAuthPrompt'
@@ -291,6 +292,30 @@ function validPlayerName(name: string): boolean {
 function ensureStateDir() {
   fs.mkdirSync(STATE_DIR, { recursive: true })
   fs.mkdirSync(AUTH_CACHE_DIR, { recursive: true })
+}
+
+function authCachePrefixForUsername(username: string): string {
+  return crypto.createHash('sha1').update(username || '', 'binary').digest('hex').slice(0, 6)
+}
+
+function clearAuthCacheForUsername(username: string): number {
+  ensureStateDir()
+  const prefix = `${authCachePrefixForUsername(username)}_`
+  let removed = 0
+
+  for (const file of fs.readdirSync(AUTH_CACHE_DIR)) {
+    if (!file.startsWith(prefix) || !file.endsWith('-cache.json')) continue
+    try {
+      fs.unlinkSync(path.join(AUTH_CACHE_DIR, file))
+      removed += 1
+    } catch {}
+  }
+
+  return removed
+}
+
+function microsoftAccountMismatchReason(expected: string, actual: string): string {
+  return `Microsoft account mismatch: Minecraft selected ${expected}, but the proxy authenticated as ${actual}. Reconnect and sign in with the Microsoft account for ${expected}.`
 }
 
 function loadNicknames(): Map<string, string> {
@@ -2656,9 +2681,21 @@ export function startProxy(): Server {
 
     upstream.on('session', () => {
       upstreamSessionReady = true
+      const authenticatedUsername = upstream.username || downstream.username
+      if (authenticatedUsername && playerKey(authenticatedUsername) !== playerKey(downstream.username)) {
+        const removed = clearAuthCacheForUsername(downstream.username)
+        const reason = microsoftAccountMismatchReason(downstream.username, authenticatedUsername)
+        const cleared = removed
+          ? ` Cleared ${removed} cached auth file(s) for ${downstream.username}.`
+          : ` No cached auth files were found for ${downstream.username}.`
+        term('Microsoft', `${reason}${cleared}`, colors.red)
+        closeBoth(reason)
+        return
+      }
+
       if (microsoftCodeShown && !microsoftAuthCompleteLogged) {
         microsoftAuthCompleteLogged = true
-        const username = upstream.username || downstream.username
+        const username = authenticatedUsername
         const message = detachedAuth
           ? `Sign-in complete for ${username}. Reconnect in Minecraft using ${LOCAL_ADDRESS}.`
           : `Sign-in complete for ${username}.`
@@ -2668,7 +2705,7 @@ export function startProxy(): Server {
 
     upstream.on('connect', () => {
       upstreamConnected = true
-      if (detachedAuth || downstreamEnded) {
+      if (localClosed || detachedAuth || downstreamEnded) {
         endClient(upstream, 'Client disconnected after Microsoft sign-in')
       }
     })
