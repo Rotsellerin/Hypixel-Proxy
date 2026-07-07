@@ -1,7 +1,7 @@
 import mc, { Client, Server, ServerClient, ServerOptions } from 'minecraft-protocol'
 import fs from 'fs'
 import path from 'path'
-import { AppConfig, SplitReminderSettings, UpstreamRoute, createRouteCatalog, loadAppConfig, normalizeAppConfig, normalizeSplitReminderSettings, routeById, saveAppConfig } from './appConfig'
+import { AppConfig, RouteId, SplitReminderSettings, UpstreamRoute, createRouteCatalog, loadAppConfig, normalizeAppConfig, normalizeSplitReminderSettings, routeById, saveAppConfig } from './appConfig'
 import { startDashboard } from './dashboard'
 import { MsaCode, microsoftAuthPrompt } from './microsoftAuthPrompt'
 
@@ -76,6 +76,12 @@ type TransferWatchState = {
   active: boolean
   expiresAt: number
 }
+type UpstreamStatusSnapshot = {
+  routeId: RouteId
+  checkedAt: number
+  latency: number | null
+  pong: any | null
+}
 
 loadDotEnv(path.join(process.cwd(), '.env'))
 
@@ -85,6 +91,7 @@ const LISTEN_PORT = Number(process.env.LISTEN_PORT || 25565)
 const STATE_DIR = process.env.STATE_DIR || path.join(process.cwd(), 'state')
 const NICKNAME_PATH = path.join(STATE_DIR, 'nicknames.json')
 const AUTH_CACHE_DIR = path.join(STATE_DIR, 'auth-cache')
+const SERVER_ICON_PATH = path.join(process.cwd(), 'assets', 'server-icon.png')
 const LOCAL_ADDRESS = LISTEN_PORT === 25565 ? 'localhost' : `localhost:${LISTEN_PORT}`
 const DASHBOARD_HOST = process.env.DASHBOARD_HOST || '127.0.0.1'
 const DASHBOARD_PORT = Number(process.env.DASHBOARD_PORT || 25765)
@@ -97,6 +104,9 @@ const ROUTES = createRouteCatalog(
 )
 let appConfig: AppConfig = loadAppConfig(STATE_DIR)
 const appLogs: AppLogEntry[] = []
+const serverIcon = loadServerIcon()
+let upstreamStatusCache: UpstreamStatusSnapshot | null = null
+let upstreamStatusInFlight: Promise<UpstreamStatusSnapshot> | null = null
 let activeSessions = 0
 const VERSION_LABEL = (() => {
   try {
@@ -112,6 +122,11 @@ const LOBBY_COMMAND_DEDUPE_MS = 2500
 const RAW_FORWARD_UPSTREAM_PACKETS = new Set(['map_chunk', 'map_chunk_bulk'])
 const TRANSFER_WATCH_MS = 20000
 const SCOREBOARD_ANALYSIS_THROTTLE_MS = 500
+const SPLIT_TITLE_FADE_IN_TICKS = 0
+const SPLIT_TITLE_STAY_TICKS = 60
+const SPLIT_TITLE_FADE_OUT_TICKS = 10
+const SERVER_LIST_PING_CACHE_MS = 5000
+const SERVER_LIST_PING_TIMEOUT_MS = 2500
 
 const colors = {
   reset: '\x1b[0m',
@@ -133,6 +148,17 @@ function loadDotEnv(filePath: string) {
     const match = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(trimmed)
     if (!match || process.env[match[1]] != null) continue
     process.env[match[1]] = match[2].replace(/^['"]|['"]$/g, '')
+  }
+}
+
+function loadServerIcon(): string | undefined {
+  if (!fs.existsSync(SERVER_ICON_PATH)) return undefined
+
+  try {
+    const base64 = fs.readFileSync(SERVER_ICON_PATH).toString('base64')
+    return `data:image/png;base64,${base64}`
+  } catch {
+    return undefined
   }
 }
 
@@ -617,20 +643,48 @@ function playerDisplayColorName(player: any): string | null {
   return chatComponentColorName(player.displayName)
 }
 
+function playerStateColorName(state: SessionState, playerName: string): string | null {
+  const player = state.playersByName.get(playerKey(playerName))
+  return playerDisplayColorName(player)
+}
+
+function teamIncludesColorName(state: SessionState, team: TeamState, colorName: string): boolean {
+  const teamColor = teamColorName(team)
+  if (teamColor) return teamColor === colorName
+
+  for (const player of team.players) {
+    if (playerStateColorName(state, player) === colorName) return true
+  }
+  return false
+}
+
+function addLocalTeamPlayersFromTeam(
+  state: SessionState,
+  playersByKey: Map<string, string>,
+  team: TeamState,
+  colorName: string | null
+) {
+  const teamColor = teamColorName(team)
+
+  for (const player of team.players) {
+    if (colorName && !teamColor && playerStateColorName(state, player) !== colorName) continue
+    addLocalTeamPlayer(playersByKey, player)
+  }
+}
+
 function localPlayerTeamSnapshotForCandidate(
   state: SessionState,
   localPlayerName: string,
   primaryTeam: TeamState
 ): LocalTeamSnapshot {
-  const localPlayer = state.playersByName.get(playerKey(localPlayerName))
-  const colorName = teamColorName(primaryTeam) || playerDisplayColorName(localPlayer)
+  const colorName = teamColorName(primaryTeam) || playerStateColorName(state, localPlayerName)
   const teams = colorName
-    ? Array.from(state.teams.values()).filter(team => teamColorName(team) === colorName)
+    ? Array.from(state.teams.values()).filter(team => teamIncludesColorName(state, team, colorName))
     : [primaryTeam]
   const playersByKey = new Map<string, string>()
 
   for (const team of teams) {
-    for (const player of team.players) addLocalTeamPlayer(playersByKey, player)
+    addLocalTeamPlayersFromTeam(state, playersByKey, team, colorName)
   }
 
   addLocalTeamPlayer(playersByKey, localPlayerName)
@@ -668,14 +722,16 @@ function scoreboardColorGroups(state: SessionState): Map<string, Set<string>> {
   const groups = new Map<string, Set<string>>()
 
   for (const team of state.teams.values()) {
-    const colorName = teamColorName(team)
-    if (!colorName) continue
-    let players = groups.get(colorName)
-    if (!players) {
-      players = new Set()
-      groups.set(colorName, players)
-    }
+    const teamColor = teamColorName(team)
     for (const player of team.players) {
+      const colorName = teamColor || playerStateColorName(state, player)
+      if (!colorName) continue
+
+      let players = groups.get(colorName)
+      if (!players) {
+        players = new Set()
+        groups.set(colorName, players)
+      }
       const clean = stripColors(player).trim()
       if (validPlayerName(clean)) players.add(playerKey(clean))
     }
@@ -696,6 +752,44 @@ function inferBedWarsTeamMaxPlayers(state: SessionState, snapshot: LocalTeamSnap
   if (colorCount > 0 && colorCount <= 4 && largestGroup >= 3) return 4
   if (largestGroup >= 2) return Math.min(largestGroup, MAX_BEDWARS_TEAM_PLAYERS)
   return MAX_BEDWARS_TEAM_PLAYERS
+}
+
+function inferBedWarsModeFromScoreboardGroups(state: SessionState): { label: string; maxPlayers: number } | null {
+  const sizes = Array.from(scoreboardColorGroups(state).values())
+    .map(players => players.size)
+    .filter(size => size > 0 && size <= MAX_BEDWARS_TEAM_PLAYERS)
+
+  if (!sizes.length) return null
+
+  const largestGroup = Math.max(...sizes)
+  const fullGroups = (size: number) => sizes.filter(groupSize => groupSize === size).length
+
+  if (largestGroup >= 4) return { label: '4v4v4v4', maxPlayers: 4 }
+  if (largestGroup === 3 && fullGroups(3) >= 2) return { label: '3v3v3v3', maxPlayers: 3 }
+  if (largestGroup === 2 && fullGroups(2) >= 4) return { label: 'Doubles', maxPlayers: 2 }
+  if (largestGroup === 1 && sizes.length >= 6) return { label: 'Solo', maxPlayers: 1 }
+
+  return null
+}
+
+function applyBedWarsTeamModeFromScoreboardGroups(
+  state: SessionState,
+  splitState: SplitReminderState
+): { label: string; maxPlayers: number } | null {
+  if (!splitState.bedWarsGameActive) return null
+  if (splitState.stableTeamMaxPlayersSource.startsWith('mode:')) return null
+
+  const mode = inferBedWarsModeFromScoreboardGroups(state)
+  if (!mode) return null
+
+  const source = `mode:${mode.label}`
+  if (splitState.stableTeamMaxPlayers === mode.maxPlayers && splitState.stableTeamMaxPlayersSource === source) {
+    return null
+  }
+
+  splitState.stableTeamMaxPlayers = mode.maxPlayers
+  splitState.stableTeamMaxPlayersSource = source
+  return mode
 }
 
 function maybeSettleTeamMaxPlayers(
@@ -1188,6 +1282,50 @@ function splitTitleText(settings: SplitReminderSettings): string {
     : `${settings.replacementText}!`
 }
 
+function splitTitleTimingPacket(packetName = 'title'): any | null {
+  if (packetName !== 'title') return null
+  return {
+    action: 2,
+    fadeIn: SPLIT_TITLE_FADE_IN_TICKS,
+    stay: SPLIT_TITLE_STAY_TICKS,
+    fadeOut: SPLIT_TITLE_FADE_OUT_TICKS
+  }
+}
+
+function splitTitleSubtitlePacket(packetName = 'title'): any | null {
+  if (packetName !== 'title' && packetName !== 'set_title_subtitle') return null
+  return {
+    ...(packetName === 'title' ? { action: 1 } : {}),
+    text: JSON.stringify({ text: 'Split with your teamate.', color: 'yellow' })
+  }
+}
+
+function splitTitleSubtitlePacketName(packetName: string): string | null {
+  if (packetName === 'title') return 'title'
+  if (packetName === 'set_title_text' || packetName === 'set_title_subtitle') return 'set_title_subtitle'
+  return null
+}
+
+function writeSplitTitleTiming(downstream: ServerClient, packetName: string) {
+  const timing = splitTitleTimingPacket(packetName)
+  if (timing) downstream.write(packetName, timing)
+}
+
+function writeSplitTitleSubtitle(downstream: ServerClient, packetName: string) {
+  const subtitlePacketName = splitTitleSubtitlePacketName(packetName)
+  if (!subtitlePacketName) return
+
+  const subtitle = splitTitleSubtitlePacket(subtitlePacketName)
+  if (!subtitle) return
+
+  downstream.write(subtitlePacketName, subtitle)
+  setTimeout(() => {
+    try {
+      if ((downstream as any).state === 'play') downstream.write(subtitlePacketName, subtitle)
+    } catch {}
+  }, 75)
+}
+
 function forcedSplitTitlePacket(packetName: string, packet: any, settings: SplitReminderSettings): any | null {
   const text = JSON.stringify({ text: splitTitleText(settings), color: 'green' })
 
@@ -1601,7 +1739,7 @@ function updateBedWarsModeFromScoreboard(
     if (result) detected = result
   }
 
-  return detected
+  return detected || applyBedWarsTeamModeFromScoreboardGroups(state, splitState)
 }
 
 function logBedWarsModeIfChanged(splitState: SplitReminderState, mode: { label: string; maxPlayers: number } | null) {
@@ -1778,6 +1916,126 @@ function lobbyWindowClickKey(data: any): string {
   return `${windowId}:${slot}:${mouseButton}:${mode}`
 }
 
+function serverListDescription(route: UpstreamRoute): any {
+  const routeColor = route.id === 'stopthelag' ? 'aqua' : 'green'
+  const ping = upstreamPingText(null)
+  return {
+    text: '',
+    extra: [
+      { text: '                           ' },
+      { text: 'Hypixel Proxy', color: 'gold', bold: true },
+      { text: '\n' },
+      { text: serverListRoutePadding(route) },
+      { text: 'Route: ', color: 'gray' },
+      { text: route.name, color: routeColor },
+      { text: ' -> Hypixel', color: 'dark_gray' },
+      { text: '  Ping: ', color: 'gray' },
+      { text: ping, color: upstreamPingColor(null) }
+    ]
+  }
+}
+
+function upstreamPingText(latency: number | null): string {
+  return latency == null ? 'checking...' : `${latency}ms`
+}
+
+function upstreamPingColor(latency: number | null): string {
+  if (latency == null) return 'dark_gray'
+  if (latency < 100) return 'green'
+  if (latency < 170) return 'yellow'
+  return 'red'
+}
+
+function serverListRoutePadding(route: UpstreamRoute): string {
+  return route.id === 'direct' ? '                 ' : '            '
+}
+
+function serverListDescriptionWithPing(route: UpstreamRoute, latency: number | null): any {
+  const routeColor = route.id === 'stopthelag' ? 'aqua' : 'green'
+  return {
+    text: '',
+    extra: [
+      { text: '                           ' },
+      { text: 'Hypixel Proxy', color: 'gold', bold: true },
+      { text: '\n' },
+      { text: serverListRoutePadding(route) },
+      { text: route.name, color: routeColor },
+      { text: ' -> Hypixel', color: 'dark_gray' },
+      { text: '  Ping: ', color: 'gray' },
+      { text: upstreamPingText(latency), color: upstreamPingColor(latency) }
+    ]
+  }
+}
+
+function serverListLegacyMotd(route: UpstreamRoute, latency: number | null = null): string {
+  return `Hypixel Proxy | ${route.name} -> Hypixel | Ping: ${upstreamPingText(latency)}`
+}
+
+function serverListPlayers(route: UpstreamRoute, sessions = activeSessions, latency: number | null = null): any {
+  const online = Math.max(0, sessions)
+  return {
+    max: Math.max(1, online),
+    online,
+    sample: [
+      { id: '00000000-0000-0000-0000-000000000001', name: `Route: ${route.name}` },
+      { id: '00000000-0000-0000-0000-000000000003', name: `Proxy -> Hypixel ping: ${upstreamPingText(latency)}` },
+      { id: '00000000-0000-0000-0000-000000000002', name: `Local: ${LOCAL_ADDRESS}` }
+    ]
+  }
+}
+
+function serverListStatusResponse(
+  route: UpstreamRoute,
+  upstreamPong: any = null,
+  clientProtocol = 47,
+  upstreamLatency: number | null = typeof upstreamPong?.latency === 'number' ? Math.round(upstreamPong.latency) : null
+): any {
+  return {
+    version: upstreamPong?.version ?? { name: VERSION, protocol: clientProtocol },
+    players: serverListPlayers(route, activeSessions, upstreamLatency),
+    description: serverListDescriptionWithPing(route, upstreamLatency),
+    favicon: serverIcon
+  }
+}
+
+async function getUpstreamStatus(route: UpstreamRoute, now = Date.now()): Promise<UpstreamStatusSnapshot> {
+  if (upstreamStatusCache && upstreamStatusCache.routeId === route.id && now - upstreamStatusCache.checkedAt < SERVER_LIST_PING_CACHE_MS) {
+    return upstreamStatusCache
+  }
+
+  if (!upstreamStatusInFlight) {
+    upstreamStatusInFlight = (async () => {
+      try {
+        const pong: any = await mc.ping({
+          host: route.host,
+          port: route.port,
+          version: VERSION,
+          closeTimeout: SERVER_LIST_PING_TIMEOUT_MS,
+          noPongTimeout: SERVER_LIST_PING_TIMEOUT_MS
+        } as any)
+        return {
+          routeId: route.id,
+          checkedAt: Date.now(),
+          latency: typeof pong?.latency === 'number' ? Math.round(pong.latency) : null,
+          pong
+        }
+      } catch {
+        return {
+          routeId: route.id,
+          checkedAt: Date.now(),
+          latency: null,
+          pong: null
+        }
+      }
+    })().finally(() => {
+      upstreamStatusInFlight = null
+    })
+  }
+
+  upstreamStatusCache = await upstreamStatusInFlight
+  return upstreamStatusCache
+}
+
 function lobbyCommandKey(message: string): string | null {
   const clean = stripColors(message).trim().replace(/\s+/g, ' ').toLowerCase()
   const [command = '', firstArg = ''] = clean.split(' ')
@@ -1944,6 +2202,10 @@ function bridgePlay(
         const updated = withSplitReminderPacket(meta.name, data, splitReminderState, appConfig.splitReminder, Date.now(), sessionState)
         if (pendingBeforeTitle && JSON.stringify(updated) !== JSON.stringify(data)) {
           term('QoL', `Split title shown from ${trigger || 'teammate death'}.`, colors.yellow)
+          writeSplitTitleTiming(downstream, meta.name)
+          downstream.write(meta.name, updated)
+          writeSplitTitleSubtitle(downstream, meta.name)
+          return
         } else if (pendingBeforeTitle && packetHasRespawnedTitleText(data, appConfig.splitReminder)) {
           const forced = forcedSplitTitlePacket(meta.name, data, appConfig.splitReminder)
           if (forced !== null) {
@@ -1953,7 +2215,9 @@ function bridgePlay(
             splitReminderState.preRespawnTrigger = ''
             splitReminderState.preRespawnTriggerAt = 0
             term('QoL', `Split title forced from ${trigger || 'teammate death'} via ${meta.name}.`, colors.yellow)
+            writeSplitTitleTiming(downstream, meta.name)
             downstream.write(meta.name, forced)
+            writeSplitTitleSubtitle(downstream, meta.name)
             return
           }
         } else if (pendingBeforeTitle) {
@@ -2042,7 +2306,9 @@ function bridgePlay(
       const rewritten = withSplitReminderUnknownPacket(data, splitReminderState, appConfig.splitReminder)
       if (pendingBeforeUnknown && rewritten.changed) {
         term('QoL', `Split title shown from ${trigger || 'teammate death'} via ${meta.name}.`, colors.yellow)
+        writeSplitTitleTiming(downstream, meta.name)
         downstream.write(meta.name, rewritten.packet)
+        writeSplitTitleSubtitle(downstream, meta.name)
         return
       } else if (pendingBeforeUnknown) {
         const snippets = respawnedPacketSnippets(data, appConfig.splitReminder)
@@ -2155,6 +2421,9 @@ export const __test = {
   localPlayerTeam,
   localTeammateNames,
   refreshLocalNicknames,
+  serverListDescription,
+  serverListPlayers,
+  serverListStatusResponse,
   trackNamedEntitySpawn,
   trackPlayerInfo,
   trackScoreboardTeam,
@@ -2165,6 +2434,8 @@ export const __test = {
   withSplitReminderUnknownPacket,
   forcedSplitTitlePacket,
   packetHasRespawnedTitleText,
+  splitTitleSubtitlePacket,
+  splitTitleTimingPacket,
   shouldRawForwardUpstreamPacket,
   withNicknameEntityMetadata,
   withNicknameNamedEntitySpawn,
@@ -2179,6 +2450,16 @@ export function startProxy(): Server {
     host: LISTEN_HOST,
     port: LISTEN_PORT,
     version: VERSION,
+    motd: serverListLegacyMotd(currentRoute()),
+    motdMsg: serverListDescription(currentRoute()),
+    maxPlayers: 1,
+    favicon: serverIcon,
+    beforePing: (response: any, client: any, callback?: (error: unknown, result: any) => void) => {
+      const route = currentRoute()
+      getUpstreamStatus(route)
+        .then(status => callback?.(null, serverListStatusResponse(route, status.pong || response, client?.protocolVersion ?? 47, status.latency)))
+        .catch(() => callback?.(null, serverListStatusResponse(route, response, client?.protocolVersion ?? 47, null)))
+    },
     keepAlive: true,
     'online-mode': true,
     hideErrors: true,
@@ -2225,36 +2506,6 @@ export function startProxy(): Server {
   })
   dashboardServer.on('error', error => {
     console.error('[hypixel-proxy] dashboard error:', error)
-  })
-
-  server.on('connection', (client: ServerClient) => {
-    client.on('packet', async (data, meta) => {
-      if (client.state !== 'status') return
-
-      if (meta.name === 'ping_start') {
-        const route = currentRoute()
-        try {
-          const pong: any = await mc.ping({ host: route.host, port: route.port, version: VERSION } as any)
-          client.write('status_response', {
-            response: JSON.stringify({
-              version: pong.version ?? { name: VERSION, protocol: (client as any).protocolVersion ?? 47 },
-              players: pong.players ?? { max: 200, online: 0, sample: [] },
-              description: typeof pong.description === 'object' ? pong.description : { text: String(pong.description || 'Hypixel') }
-            })
-          })
-        } catch {
-          client.write('status_response', {
-            response: JSON.stringify({
-              version: { name: VERSION, protocol: (client as any).protocolVersion ?? 47 },
-              players: { max: 0, online: 0, sample: [] },
-              description: { text: 'Hypixel' }
-            })
-          })
-        }
-      }
-
-      if (meta.name === 'ping') client.write('pong', { time: (data as any).time })
-    })
   })
 
   server.on('login', (downstream: ServerClient) => {

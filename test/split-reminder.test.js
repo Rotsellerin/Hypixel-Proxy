@@ -347,6 +347,44 @@ __test.trackScoreboardTeam('scoreboard_team', {
 }, observedFourSession, new Map())
 assert.deepEqual(__test.localTeammateNames(observedFourSession, localPlayer, observedFourState, 6000), ['Camilk016', 'limpbizkitt', 'Smiley61', localPlayer])
 
+const displayColorSession = __test.createSessionState()
+const displayColorState = __test.createSplitReminderState()
+markGameStarted(displayColorState)
+__test.trackPlayerInfo({
+  action: 0,
+  data: [
+    { name: 'FishHalo', uuid: 'fishhalo', displayName: '\u00a7cFishHalo' },
+    { name: 'BlueOne', uuid: 'blue-one', displayName: '\u00a79BlueOne' },
+    { name: 'BlueTwo', uuid: 'blue-two', displayName: '\u00a79BlueTwo' },
+    { name: 'BlueThree', uuid: 'blue-three', displayName: '\u00a79BlueThree' },
+    { name: 'BlueFour', uuid: 'blue-four', displayName: '\u00a79BlueFour' }
+  ]
+}, displayColorSession)
+__test.trackScoreboardTeam('scoreboard_team', {
+  team: 'red-local',
+  mode: 0,
+  prefix: '\u00a7c',
+  players: [localPlayer, 'SupremFouf']
+}, displayColorSession, new Map())
+__test.trackScoreboardTeam('scoreboard_team', {
+  team: 'red-display-name',
+  mode: 0,
+  players: ['FishHalo']
+}, displayColorSession, new Map())
+__test.trackScoreboardTeam('scoreboard_team', {
+  team: 'blue-display-name',
+  mode: 0,
+  players: ['BlueOne', 'BlueTwo', 'BlueThree', 'BlueFour']
+}, displayColorSession, new Map())
+assert.deepEqual(__test.updateBedWarsModeFromScoreboard(displayColorSession, displayColorState), {
+  label: '4v4v4v4',
+  maxPlayers: 4
+})
+assert.deepEqual(
+  __test.localTeammateNames(displayColorSession, localPlayer, displayColorState, 5000),
+  ['FishHalo', localPlayer, 'SupremFouf']
+)
+
 const scoreboardModeSession = __test.createSessionState()
 const scoreboardModeState = __test.createSplitReminderState()
 markGameStarted(scoreboardModeState)
@@ -821,6 +859,18 @@ assert.equal(__test.packetHasRespawnedTitleText({
 const forcedTitle = __test.forcedSplitTitlePacket('title', { action: 2, fadeIn: 0, stay: 20, fadeOut: 0 }, settings)
 assert.equal(forcedTitle.action, 0)
 assert.deepEqual(JSON.parse(forcedTitle.text), { text: 'SPLIT!', color: 'green' })
+assert.deepEqual(__test.splitTitleTimingPacket('title'), {
+  action: 2,
+  fadeIn: 0,
+  stay: 60,
+  fadeOut: 10
+})
+assert.equal(__test.splitTitleTimingPacket('set_title_text'), null)
+const splitSubtitle = __test.splitTitleSubtitlePacket('title')
+assert.equal(splitSubtitle.action, 1)
+assert.deepEqual(JSON.parse(splitSubtitle.text), { text: 'Split with your teamate.', color: 'yellow' })
+assert.equal(__test.splitTitleSubtitlePacket('set_title_text'), null)
+assert.deepEqual(JSON.parse(__test.splitTitleSubtitlePacket('set_title_subtitle').text), { text: 'Split with your teamate.', color: 'yellow' })
 
 const unknownPacketState = __test.createSplitReminderState()
 markGameStarted(unknownPacketState)
