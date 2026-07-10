@@ -5,6 +5,7 @@ type ControlApiOptions = {
   host: string
   port: number
   getStatus: () => unknown
+  getSplitSoundStatus: () => unknown
   setRoute: (routeId: string) => unknown
   setSplitReminderEnabled: (enabled: boolean) => unknown
   shutdown: () => unknown
@@ -55,6 +56,11 @@ function readJson(req: IncomingMessage): Promise<any> {
 async function handleApi(req: IncomingMessage, res: ServerResponse, opts: ControlApiOptions, pathname: string) {
   if (req.method === 'GET' && pathname === '/api/status') {
     sendJson(res, 200, opts.getStatus())
+    return
+  }
+
+  if (req.method === 'GET' && pathname === '/api/split-sound') {
+    sendJson(res, 200, opts.getSplitSoundStatus())
     return
   }
 

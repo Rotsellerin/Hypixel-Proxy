@@ -4,7 +4,7 @@
   "description": "Minecraft proxy that connects directly to Hypixel and supports local player nicknames.",
   "main": "dist/index.js",
   "scripts": {
-    "test": "npm run build && node test/auth-prompt.test.js && node test/routing-config.test.js && node test/dashboard-auth-log.test.js && node test/split-reminder.test.js && node test/nickname-packets.test.js && node test/server-list-status.test.js",
+    "test": "npm run build && node test/auth-prompt.test.js && node test/routing-config.test.js && node test/dashboard-auth-log.test.js && node test/split-reminder.test.js && node test/nickname-packets.test.js && node test/apollo-nickname.test.js && node test/server-list-status.test.js",
     "build": "tsc",
     "start": "node dist/index.js"
   },

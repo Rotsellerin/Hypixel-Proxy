@@ -5,6 +5,21 @@ const { __test } = require('../dist/index')
 const settings = DEFAULT_SPLIT_REMINDER
 const localPlayer = 'storabollar'
 
+assert.equal(__test.playerInfoMayChangeBedWarsRoster({ action: 'add_player' }), true)
+assert.equal(__test.playerInfoMayChangeBedWarsRoster({ action: 0 }), true)
+assert.equal(__test.playerInfoMayChangeBedWarsRoster({ action: 'update_display_name' }), true)
+assert.equal(__test.playerInfoMayChangeBedWarsRoster({ action: 3 }), true)
+assert.equal(__test.playerInfoMayChangeBedWarsRoster({ action: 'remove_player' }), true)
+assert.equal(__test.playerInfoMayChangeBedWarsRoster({ action: 4 }), true)
+assert.equal(__test.playerInfoMayChangeBedWarsRoster({ action: 'update_latency' }), false)
+assert.equal(__test.playerInfoMayChangeBedWarsRoster({ action: 2 }), false)
+
+const activeGameForChunkWatch = __test.createSplitReminderState()
+activeGameForChunkWatch.bedWarsGameActive = true
+assert.equal(__test.shouldExtendTransferWatchFromChunk(activeGameForChunkWatch, { active: false, expiresAt: 0 }), false)
+assert.equal(__test.shouldExtendTransferWatchFromChunk(activeGameForChunkWatch, { active: true, expiresAt: 1 }), true)
+assert.equal(__test.shouldExtendTransferWatchFromChunk(__test.createSplitReminderState(), { active: false, expiresAt: 0 }), true)
+
 function sessionWithTeams () {
   const session = __test.createSessionState()
   __test.trackScoreboardTeam('scoreboard_team', {
@@ -680,6 +695,73 @@ assert.deepEqual(
   ['DisplayMate', localPlayer]
 )
 
+const retainedTabSession = __test.createSessionState()
+const retainedTabState = __test.createSplitReminderState()
+__test.trackScoreboardTeam('scoreboard_team', {
+  team: 'blue-local',
+  mode: 0,
+  prefix: '\u00a79B ',
+  players: [localPlayer]
+}, retainedTabSession, new Map())
+__test.trackScoreboardTeam('scoreboard_team', {
+  team: 'blue-one',
+  mode: 0,
+  prefix: '\u00a79B ',
+  players: ['Beebuzzer777']
+}, retainedTabSession, new Map())
+__test.trackScoreboardTeam('scoreboard_team', {
+  team: 'blue-two',
+  mode: 0,
+  prefix: '\u00a79B ',
+  players: ['Super0SS', 'fontiejacnh200']
+}, retainedTabSession, new Map())
+__test.trackScoreboardTeam('scoreboard_team', {
+  team: 'red-enemy',
+  mode: 0,
+  prefix: '\u00a7cR ',
+  players: ['EnemyPlayer']
+}, retainedTabSession, new Map())
+__test.withSplitReminderChatComponent(
+  { text: 'The game starts in 5 seconds!' },
+  retainedTabState,
+  settings,
+  100,
+  splitContext(retainedTabSession)
+)
+__test.withSplitReminderPacket('title', {
+  text: JSON.stringify({ text: 'Protect your bed and destroy the enemy beds.' })
+}, retainedTabState, settings, 500, retainedTabSession, localPlayer)
+assert.deepEqual(
+  __test.localTeammateNames(retainedTabSession, localPlayer, retainedTabState, 5000),
+  ['Beebuzzer777', 'fontiejacnh200', localPlayer, 'Super0SS']
+)
+
+const growingInferredSession = __test.createSessionState()
+const growingInferredState = __test.createSplitReminderState()
+__test.withSplitReminderPacket('title', {
+  text: JSON.stringify({ text: 'Protect your bed and destroy the enemy beds.' })
+}, growingInferredState, settings, 500, growingInferredSession, localPlayer)
+__test.trackScoreboardTeam('scoreboard_team', {
+  team: 'blue-partial',
+  mode: 0,
+  prefix: '\u00a79B ',
+  players: [localPlayer, 'Beebuzzer777']
+}, growingInferredSession, new Map())
+assert.deepEqual(
+  __test.localTeammateNames(growingInferredSession, localPlayer, growingInferredState, 5000),
+  ['Beebuzzer777', localPlayer]
+)
+__test.trackScoreboardTeam('scoreboard_team', {
+  team: 'blue-late',
+  mode: 0,
+  prefix: '\u00a79B ',
+  players: ['Super0SS', 'fontiejacnh200']
+}, growingInferredSession, new Map())
+assert.deepEqual(
+  __test.localTeammateNames(growingInferredSession, localPlayer, growingInferredState, 6000),
+  ['Beebuzzer777', 'fontiejacnh200', localPlayer, 'Super0SS']
+)
+
 const nextGameSession = sessionWithSplitColorTeams()
 const nextGameState = __test.createSplitReminderState()
 markGameStarted(nextGameState)
@@ -739,6 +821,7 @@ const death = __test.withSplitReminderChatComponent(
 assert.equal(death.text, 'You will respawn in 5 seconds!')
 assert.equal(state.respawning, true)
 assert.equal(state.splitPending, false)
+assert.equal(state.splitSignalId, 0)
 
 const teammateVoid = __test.withSplitReminderChatComponent(
   { text: 'galenballe fell into the void.' },
@@ -749,7 +832,17 @@ const teammateVoid = __test.withSplitReminderChatComponent(
 )
 assert.equal(teammateVoid.text, 'galenballe fell into the void.')
 assert.equal(state.splitPending, true)
+assert.equal(state.splitSignalId, 1)
 assert.match(state.lastTrigger, /galenballe fell into the void/)
+
+__test.withSplitReminderChatComponent(
+  { text: 'galenballe fell into the void.' },
+  state,
+  settings,
+  1550,
+  splitContext(session)
+)
+assert.equal(state.splitSignalId, 1)
 
 __test.withSplitReminderChatComponent(
   { text: 'You will respawn in 4 seconds!' },

@@ -8,7 +8,7 @@ const playerInfo = {
   data: [{
     uuid: '00112233-4455-6677-8899-aabbccddeeff',
     name: '998r',
-    properties: [],
+    properties: [{ name: 'textures', value: 'original-skin-and-cape-data', signature: 'signed' }],
     gamemode: 0,
     ping: 47,
     displayName: JSON.stringify({ text: '[VIP] 998r', color: 'green' })
@@ -16,7 +16,8 @@ const playerInfo = {
 }
 
 const rewrittenPlayerInfo = __test.withNicknamePlayerInfo(playerInfo, nicknames)
-assert.equal(rewrittenPlayerInfo.data[0].name, 'Bollen')
+assert.equal(rewrittenPlayerInfo.data[0].name, '998r')
+assert.deepEqual(rewrittenPlayerInfo.data[0].properties, playerInfo.data[0].properties)
 assert.match(rewrittenPlayerInfo.data[0].displayName, /Bollen/)
 assert.doesNotMatch(rewrittenPlayerInfo.data[0].displayName, /998r/)
 
@@ -35,7 +36,7 @@ const teamPacket = {
 const rewrittenTeam = __test.withNicknameScoreboardTeam(teamPacket, nicknames)
 assert.equal(rewrittenTeam.prefix, '[VIP] ')
 assert.equal(rewrittenTeam.suffix, ' [S1]')
-assert.deepEqual(rewrittenTeam.players, ['Bollen'])
+assert.deepEqual(rewrittenTeam.players, ['998r'])
 
 const scorePacket = {
   itemName: '998r',
@@ -44,7 +45,7 @@ const scorePacket = {
   value: 20
 }
 const rewrittenScore = __test.withNicknameScoreboardScore(scorePacket, nicknames)
-assert.equal(rewrittenScore.itemName, 'Bollen')
+assert.equal(rewrittenScore.itemName, '998r')
 assert.equal(rewrittenScore.scoreName, 'health')
 assert.equal(rewrittenScore.value, 20)
 
@@ -61,6 +62,17 @@ assert.equal(rewrittenMetadata.metadata[1].value, 1)
 
 const state = __test.createSessionState()
 __test.trackPlayerInfo(playerInfo, state)
+__test.trackPlayerInfo({
+  action: 'add_player',
+  data: [{
+    uuid: '11112222-3333-4444-5555-666677778888',
+    name: 'LobbyNPC',
+    properties: [],
+    gamemode: 0,
+    ping: 0,
+    displayName: JSON.stringify({ text: 'Lobby NPC' })
+  }]
+}, state)
 __test.trackScoreboardTeam('scoreboard_team', teamPacket, state, new Map())
 __test.trackScoreboardScore(scorePacket, state)
 __test.trackNamedEntitySpawn({
@@ -72,7 +84,18 @@ __test.trackNamedEntitySpawn({
   yaw: 0,
   pitch: 0,
   currentItem: 0,
-  metadata: []
+  metadata: metadataPacket.metadata
+}, state)
+__test.trackNamedEntitySpawn({
+  entityId: 8,
+  playerUUID: '11112222-3333-4444-5555-666677778888',
+  x: 0,
+  y: 0,
+  z: 0,
+  yaw: 0,
+  pitch: 0,
+  currentItem: 0,
+  metadata: [{ key: 2, type: 4, value: 'Lobby NPC' }]
 }, state)
 
 const writes = []
@@ -82,15 +105,37 @@ const downstream = {
   }
 }
 
-__test.refreshLocalNicknames(downstream, state, nicknames)
+__test.refreshLocalNicknames(downstream, state, nicknames, '998r')
 
-assert.ok(writes.some(write => write.name === 'player_info' && write.params.action === 'remove_player'))
-assert.ok(writes.some(write => write.name === 'player_info' && write.params.action === 'add_player' && write.params.data[0].name === 'Bollen'))
-assert.ok(writes.some(write => write.name === 'scoreboard_team' && write.params.mode === 4 && write.params.players.includes('998r')))
-assert.ok(writes.some(write => write.name === 'scoreboard_team' && write.params.mode === 3 && write.params.players.includes('Bollen')))
-assert.ok(writes.some(write => write.name === 'scoreboard_score' && write.params.itemName === 'Bollen' && write.params.scoreName === 'health' && write.params.value === 20))
-assert.ok(writes.some(write => write.name === 'entity_destroy' && write.params.entityIds.includes(7)))
-assert.ok(writes.some(write => write.name === 'named_entity_spawn' && write.params.entityId === 7 && write.params.playerUUID === playerInfo.data[0].uuid))
+const displayUpdates = writes.filter(write => write.name === 'player_info' && write.params.action === 'update_display_name')
+assert.equal(displayUpdates.length, 1)
+assert.equal(displayUpdates[0].params.data[0].uuid, playerInfo.data[0].uuid)
+assert.match(displayUpdates[0].params.data[0].displayName, /Bollen/)
+assert.ok(writes.some(write => write.name === 'entity_metadata' && write.params.entityId === 7 && write.params.metadata[0].value.includes('Bollen')))
+assert.ok(!writes.some(write => write.name === 'player_info' && write.params.action === 'remove_player'))
+assert.ok(!writes.some(write => write.name === 'player_info' && write.params.action === 'add_player'))
+assert.ok(!writes.some(write => write.name === 'scoreboard_team'))
+assert.ok(!writes.some(write => write.name === 'scoreboard_score'))
+assert.ok(!writes.some(write => write.name === 'entity_destroy'))
+assert.ok(!writes.some(write => write.name === 'named_entity_spawn'))
+assert.ok(!writes.some(write => write.name === 'entity_metadata' && write.params.entityId === 8))
+
+writes.length = 0
+__test.refreshLocalNicknames(downstream, state, new Map(), '998r')
+assert.equal(writes.length, 2)
+assert.match(writes[0].params.data[0].displayName, /998r/)
+assert.doesNotMatch(writes[0].params.data[0].displayName, /Bollen/)
+assert.equal(writes[1].name, 'entity_metadata')
+assert.match(writes[1].params.metadata[0].value, /998r/)
+
+const displayUpdatePacket = {
+  action: 'update_display_name',
+  data: [{ uuid: playerInfo.data[0].uuid, displayName: JSON.stringify({ text: '[MVP] 998r' }) }]
+}
+__test.trackPlayerInfo(displayUpdatePacket, state)
+const rewrittenDisplayUpdate = __test.withNicknamePlayerInfo(displayUpdatePacket, nicknames, state)
+assert.match(rewrittenDisplayUpdate.data[0].displayName, /Bollen/)
+assert.doesNotMatch(rewrittenDisplayUpdate.data[0].displayName, /998r/)
 
 assert.equal(__test.lobbyCommandKey('/l'), 'lobby')
 assert.equal(__test.lobbyCommandKey('  /L  '), 'lobby')

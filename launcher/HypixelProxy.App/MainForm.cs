@@ -1,8 +1,11 @@
 using System.Diagnostics;
 using System.ComponentModel;
+using System.Buffers.Binary;
 using System.Drawing.Drawing2D;
+using System.Media;
 using System.Net.Http.Json;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace HypixelProxy.App;
@@ -32,20 +35,31 @@ public sealed class MainForm : Form
     private const int MissedStatusPollsBeforeStopped = 80;
 
     private readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(2) };
-    private readonly System.Windows.Forms.Timer refreshTimer = new() { Interval = 1500 };
+    private readonly System.Windows.Forms.Timer refreshTimer = new() { Interval = 500 };
+    private readonly System.Windows.Forms.Timer splitSoundTimer = new() { Interval = 250 };
+    private readonly byte[]? splitSoundWave;
     private readonly string rootDir;
     private readonly Uri dashboardUri;
     private readonly TableLayoutPanel rootLayout = new();
 
+    private SoundPlayer? splitSoundPlayer;
+    private MemoryStream? splitSoundStream;
+    private int splitSoundPlayerVolume = -1;
+    private int splitSoundVolume;
     private ProxyStatus? lastStatus;
     private Process? proxyProcess;
     private int missedStatusPolls;
     private bool refreshInFlight;
+    private bool splitSoundRefreshInFlight;
+    private bool splitSoundEndpointAvailable;
     private bool routeChanging;
     private bool splitChanging;
     private bool closingConfirmed;
     private bool logsExpanded;
     private bool qolDrawerOpen;
+    private long? lastSplitSoundEventId;
+    private bool splitSoundLogInitialized;
+    private string? lastSplitSoundLogSignature;
 
     private readonly StatusBadge statusBadge = new();
     private readonly Label routingHint = MutedLabel("Ready for next connection");
@@ -77,12 +91,17 @@ public sealed class MainForm : Form
     private readonly TextBox authCode = new();
     private readonly ModernButton openBrowserButton = ModernButton.Secondary("Open browser");
     private readonly ModernButton copyCodeButton = ModernButton.Primary("Copy code", Accent);
+    private readonly ModernButton testSplitSoundButton = ModernButton.Secondary("Test sound");
+    private readonly VolumeSlider splitSoundVolumeSlider = new();
+    private readonly Label splitSoundVolumeValue = new();
     private Control? mainArea;
 
     public MainForm()
     {
         rootDir = FindRootDirectory();
         dashboardUri = ReadDashboardUri(rootDir);
+        splitSoundWave = LoadSplitSoundWave();
+        splitSoundVolume = LoadSplitSoundVolume(rootDir);
 
         Text = "Hypixel Proxy";
         if (WindowIcon is not null) Icon = WindowIcon;
@@ -96,13 +115,17 @@ public sealed class MainForm : Form
         BuildUi();
 
         refreshTimer.Tick += async (_, _) => await RefreshStatusAsync();
+        splitSoundTimer.Tick += async (_, _) => await RefreshSplitSoundAsync();
         Shown += async (_, _) =>
         {
             refreshTimer.Start();
+            splitSoundTimer.Start();
             await RefreshStatusAsync();
+            await RefreshSplitSoundAsync();
         };
         FormClosing += async (_, e) =>
         {
+            SaveLauncherSettings();
             if (closingConfirmed || lastStatus is null) return;
             e.Cancel = true;
             var close = MessageBox.Show(
@@ -114,9 +137,11 @@ public sealed class MainForm : Form
             if (close == DialogResult.Cancel) return;
             if (close == DialogResult.Yes) await StopProxyAsync();
             refreshTimer.Stop();
+            splitSoundTimer.Stop();
             closingConfirmed = true;
             BeginInvoke(Close);
         };
+        FormClosed += (_, _) => DisposeSplitSoundPlayer();
     }
 
     private void BuildUi()
@@ -358,7 +383,7 @@ public sealed class MainForm : Form
 
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 184));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 240));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.BackColor = Surface;
         qolDrawer.Controls.Add(layout);
@@ -390,9 +415,10 @@ public sealed class MainForm : Form
             Margin = new Padding(0, 8, 0, 14),
             BackColor = SurfaceAlt
         };
-        var splitLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, BackColor = SurfaceAlt };
+        var splitLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, BackColor = SurfaceAlt };
         splitLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-        splitLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));
+        splitLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
+        splitLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
         splitLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         splitCard.Controls.Add(splitLayout);
 
@@ -425,6 +451,40 @@ public sealed class MainForm : Form
             ForeColor = TextMuted,
             TextAlign = ContentAlignment.TopLeft
         }, 0, 1);
+
+        var volumeRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, BackColor = SurfaceAlt };
+        volumeRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 68));
+        volumeRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        volumeRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 48));
+        volumeRow.Controls.Add(new Label
+        {
+            Text = "Volume",
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0),
+            Font = new Font("Segoe UI", 9.25f, FontStyle.Bold),
+            ForeColor = TextStrong,
+            TextAlign = ContentAlignment.MiddleLeft
+        }, 0, 0);
+
+        splitSoundVolumeSlider.Dock = DockStyle.Fill;
+        splitSoundVolumeSlider.Margin = new Padding(8, 9, 8, 9);
+        splitSoundVolumeSlider.Value = splitSoundVolume;
+        splitSoundVolumeSlider.ValueChanged += (_, _) => SetSplitSoundVolume(splitSoundVolumeSlider.Value);
+        splitSoundVolumeSlider.ValueCommitted += (_, _) => SaveLauncherSettings();
+        volumeRow.Controls.Add(splitSoundVolumeSlider, 1, 0);
+
+        splitSoundVolumeValue.Dock = DockStyle.Fill;
+        splitSoundVolumeValue.Text = $"{splitSoundVolume}%";
+        splitSoundVolumeValue.Font = new Font("Segoe UI", 9.25f, FontStyle.Bold);
+        splitSoundVolumeValue.ForeColor = TextMuted;
+        splitSoundVolumeValue.TextAlign = ContentAlignment.MiddleRight;
+        volumeRow.Controls.Add(splitSoundVolumeValue, 2, 0);
+        splitLayout.Controls.Add(volumeRow, 0, 2);
+
+        testSplitSoundButton.Dock = DockStyle.Fill;
+        testSplitSoundButton.Margin = new Padding(0, 2, 0, 0);
+        testSplitSoundButton.Click += (_, _) => PlaySplitSound();
+        splitLayout.Controls.Add(testSplitSoundButton, 0, 3);
 
         layout.Controls.Add(splitCard, 0, 1);
 
@@ -597,6 +657,37 @@ public sealed class MainForm : Form
         }
     }
 
+    private async Task RefreshSplitSoundAsync()
+    {
+        if (splitSoundRefreshInFlight) return;
+        splitSoundRefreshInFlight = true;
+
+        try
+        {
+            var status = await TryGetSplitSoundStatusAsync();
+            splitSoundEndpointAvailable = status is not null;
+            if (status is null) return;
+
+            if (lastSplitSoundEventId is null || status.EventId < lastSplitSoundEventId.Value)
+            {
+                lastSplitSoundEventId = status.EventId;
+                return;
+            }
+
+            if (status.EventId == lastSplitSoundEventId.Value) return;
+            lastSplitSoundEventId = status.EventId;
+            PlaySplitSound();
+        }
+        catch
+        {
+            // Audio notification failure must never affect proxy controls.
+        }
+        finally
+        {
+            splitSoundRefreshInFlight = false;
+        }
+    }
+
     private void RenderStatus(ProxyStatus? status)
     {
         if (status is null)
@@ -637,8 +728,36 @@ public sealed class MainForm : Form
         splitToggle.Checked = status.SplitReminder?.Enabled ?? true;
         splitChanging = false;
 
+        if (!splitSoundEndpointAvailable) HandleSplitSoundLog(status.Logs);
+
         logsView.LogText = BuildLogs(status.Logs);
         RenderAuth(status.Logs);
+    }
+
+    private void HandleSplitSoundLog(IReadOnlyList<LogEntry> logs)
+    {
+        var latest = logs.LastOrDefault(log =>
+            string.Equals(log.Label, "QoL", StringComparison.OrdinalIgnoreCase) &&
+            log.Message?.StartsWith("Split armed by ", StringComparison.OrdinalIgnoreCase) == true);
+        var signature = latest is null ? null : $"{latest.Time}|{latest.Message}";
+
+        if (!splitSoundLogInitialized)
+        {
+            splitSoundLogInitialized = true;
+            lastSplitSoundLogSignature = signature;
+            return;
+        }
+
+        if (signature is null || signature == lastSplitSoundLogSignature) return;
+        lastSplitSoundLogSignature = signature;
+        try
+        {
+            PlaySplitSound();
+        }
+        catch
+        {
+            // Audio notification failure must never affect proxy controls.
+        }
     }
 
     private void SetQolDrawerVisible(bool visible)
@@ -735,6 +854,18 @@ public sealed class MainForm : Form
         try
         {
             return await http.GetFromJsonAsync<ProxyStatus>(new Uri(dashboardUri, "/api/status"));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private async Task<SplitSoundStatus?> TryGetSplitSoundStatusAsync()
+    {
+        try
+        {
+            return await http.GetFromJsonAsync<SplitSoundStatus>(new Uri(dashboardUri, "/api/split-sound"));
         }
         catch
         {
@@ -947,6 +1078,153 @@ public sealed class MainForm : Form
         return (Icon)icon.Clone();
     }
 
+    private void SetSplitSoundVolume(int volume)
+    {
+        var next = Math.Clamp(volume, 0, 100);
+        splitSoundVolume = next;
+        splitSoundVolumeValue.Text = $"{next}%";
+        splitSoundPlayerVolume = -1;
+    }
+
+    private void PlaySplitSound()
+    {
+        if (splitSoundVolume <= 0) return;
+
+        try
+        {
+            EnsureSplitSoundPlayer();
+            splitSoundPlayer?.Play();
+        }
+        catch
+        {
+            // Audio notification failure must never affect proxy controls.
+        }
+    }
+
+    private void EnsureSplitSoundPlayer()
+    {
+        if (splitSoundWave is null || splitSoundPlayerVolume == splitSoundVolume) return;
+
+        DisposeSplitSoundPlayer();
+        var adjustedWave = ApplyWaveVolume(splitSoundWave, splitSoundVolume);
+        splitSoundStream = new MemoryStream(adjustedWave, writable: false);
+        splitSoundPlayer = new SoundPlayer(splitSoundStream);
+        splitSoundPlayer.Load();
+        splitSoundPlayerVolume = splitSoundVolume;
+    }
+
+    private void DisposeSplitSoundPlayer()
+    {
+        try
+        {
+            splitSoundPlayer?.Stop();
+            splitSoundPlayer?.Dispose();
+            splitSoundStream?.Dispose();
+        }
+        catch
+        {
+        }
+
+        splitSoundPlayer = null;
+        splitSoundStream = null;
+        splitSoundPlayerVolume = -1;
+    }
+
+    private static byte[]? LoadSplitSoundWave()
+    {
+        using var stream = typeof(MainForm).Assembly.GetManifestResourceStream("HypixelProxy.App.Assets.SplitPling.wav");
+        if (stream is null) return null;
+
+        using var buffer = new MemoryStream();
+        stream.CopyTo(buffer);
+        return buffer.ToArray();
+    }
+
+    private static byte[] ApplyWaveVolume(byte[] source, int volume)
+    {
+        var adjusted = (byte[])source.Clone();
+        var gain = Math.Clamp(volume, 0, 100) / 100d;
+        if (gain >= 1d || adjusted.Length < 44) return adjusted;
+        if (Encoding.ASCII.GetString(adjusted, 0, 4) != "RIFF" || Encoding.ASCII.GetString(adjusted, 8, 4) != "WAVE") return adjusted;
+
+        short audioFormat = 0;
+        short bitsPerSample = 0;
+        var dataOffset = -1;
+        var dataLength = 0;
+
+        for (var offset = 12; offset + 8 <= adjusted.Length;)
+        {
+            var chunkId = Encoding.ASCII.GetString(adjusted, offset, 4);
+            var chunkSize = BinaryPrimitives.ReadInt32LittleEndian(adjusted.AsSpan(offset + 4, 4));
+            var chunkData = offset + 8;
+            if (chunkSize < 0 || chunkData + chunkSize > adjusted.Length) break;
+
+            if (chunkId == "fmt " && chunkSize >= 16)
+            {
+                audioFormat = BinaryPrimitives.ReadInt16LittleEndian(adjusted.AsSpan(chunkData, 2));
+                bitsPerSample = BinaryPrimitives.ReadInt16LittleEndian(adjusted.AsSpan(chunkData + 14, 2));
+            }
+            else if (chunkId == "data")
+            {
+                dataOffset = chunkData;
+                dataLength = chunkSize;
+                break;
+            }
+
+            offset = chunkData + chunkSize + (chunkSize & 1);
+        }
+
+        if (audioFormat != 1 || bitsPerSample != 16 || dataOffset < 0) return adjusted;
+
+        var dataEnd = Math.Min(adjusted.Length, dataOffset + dataLength);
+        for (var offset = dataOffset; offset + 1 < dataEnd; offset += 2)
+        {
+            var sample = BinaryPrimitives.ReadInt16LittleEndian(adjusted.AsSpan(offset, 2));
+            var scaled = (short)Math.Clamp((int)Math.Round(sample * gain), short.MinValue, short.MaxValue);
+            BinaryPrimitives.WriteInt16LittleEndian(adjusted.AsSpan(offset, 2), scaled);
+        }
+
+        return adjusted;
+    }
+
+    private static int LoadSplitSoundVolume(string rootDirectory)
+    {
+        try
+        {
+            var path = Path.Combine(rootDirectory, "state", "launcher-settings.json");
+            if (!File.Exists(path)) return 100;
+            var settings = JsonSerializer.Deserialize<LauncherSettings>(File.ReadAllText(path));
+            return Math.Clamp(settings?.SplitSoundVolume ?? 100, 0, 100);
+        }
+        catch
+        {
+            return 100;
+        }
+    }
+
+    private void SaveLauncherSettings()
+    {
+        try
+        {
+            var stateDirectory = Path.Combine(rootDir, "state");
+            Directory.CreateDirectory(stateDirectory);
+            var path = Path.Combine(stateDirectory, "launcher-settings.json");
+            var json = JsonSerializer.Serialize(
+                new LauncherSettings { SplitSoundVolume = splitSoundVolume },
+                new JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(path, json);
+        }
+        catch
+        {
+            // Launcher preferences should never prevent the app from closing.
+        }
+    }
+
+    private sealed class LauncherSettings
+    {
+        public int SplitSoundVolume { get; set; } = 100;
+    }
+
     private sealed class ProxyStatus
     {
         [JsonPropertyName("localAddress")]
@@ -966,6 +1244,12 @@ public sealed class MainForm : Form
 
         [JsonPropertyName("logs")]
         public List<LogEntry> Logs { get; set; } = [];
+    }
+
+    private sealed class SplitSoundStatus
+    {
+        [JsonPropertyName("eventId")]
+        public long EventId { get; set; }
     }
 
     private sealed class SplitReminderInfo
@@ -1258,6 +1542,165 @@ public sealed class MainForm : Form
             var knob = new Rectangle(knobX, track.Top + 3, knobSize, knobSize);
             using var knobBrush = new SolidBrush(Color.White);
             pevent.Graphics.FillEllipse(knobBrush, knob);
+        }
+    }
+
+    private sealed class VolumeSlider : Control
+    {
+        private const int ThumbSize = 16;
+        private const int SidePadding = ThumbSize / 2;
+        private bool dragging;
+        private bool hovering;
+        private int value = 100;
+
+        public event EventHandler? ValueChanged;
+        public event EventHandler? ValueCommitted;
+
+        [Browsable(false)]
+        [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+        public int Value
+        {
+            get => value;
+            set
+            {
+                var next = Math.Clamp(value, 0, 100);
+                if (this.value == next) return;
+                this.value = next;
+                Invalidate();
+                ValueChanged?.Invoke(this, EventArgs.Empty);
+            }
+        }
+
+        public VolumeSlider()
+        {
+            Height = 30;
+            MinimumSize = new Size(90, 28);
+            Cursor = Cursors.Hand;
+            DoubleBuffered = true;
+            TabStop = true;
+            AccessibleName = "Split sound volume";
+            AccessibleRole = AccessibleRole.Slider;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.Selectable | ControlStyles.UserPaint, true);
+        }
+
+        protected override void OnMouseEnter(EventArgs e)
+        {
+            hovering = true;
+            Invalidate();
+            base.OnMouseEnter(e);
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            hovering = false;
+            Invalidate();
+            base.OnMouseLeave(e);
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            if (Enabled && e.Button == MouseButtons.Left)
+            {
+                Focus();
+                dragging = true;
+                Capture = true;
+                SetValueFromMouse(e.X);
+            }
+            base.OnMouseDown(e);
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            if (Enabled && dragging) SetValueFromMouse(e.X);
+            base.OnMouseMove(e);
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left && dragging)
+            {
+                SetValueFromMouse(e.X);
+                dragging = false;
+                Capture = false;
+                ValueCommitted?.Invoke(this, EventArgs.Empty);
+            }
+            base.OnMouseUp(e);
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            var next = Value;
+            if (e.KeyCode is Keys.Left or Keys.Down) next -= 5;
+            else if (e.KeyCode is Keys.Right or Keys.Up) next += 5;
+            else if (e.KeyCode == Keys.Home) next = 0;
+            else if (e.KeyCode == Keys.End) next = 100;
+            else
+            {
+                base.OnKeyDown(e);
+                return;
+            }
+
+            e.Handled = true;
+            Value = next;
+            ValueCommitted?.Invoke(this, EventArgs.Empty);
+            base.OnKeyDown(e);
+        }
+
+        protected override void OnGotFocus(EventArgs e)
+        {
+            Invalidate();
+            base.OnGotFocus(e);
+        }
+
+        protected override void OnLostFocus(EventArgs e)
+        {
+            Invalidate();
+            base.OnLostFocus(e);
+        }
+
+        protected override void OnEnabledChanged(EventArgs e)
+        {
+            Invalidate();
+            base.OnEnabledChanged(e);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            e.Graphics.Clear(PaintBackColor(this));
+
+            var usableWidth = Math.Max(1, Width - SidePadding * 2);
+            var centerY = Height / 2;
+            var track = new Rectangle(SidePadding, centerY - 3, usableWidth, 6);
+            var thumbCenterX = SidePadding + (int)Math.Round(usableWidth * (Value / 100d));
+            var activeWidth = Math.Max(0, thumbCenterX - track.Left);
+
+            using var trackPath = RoundedRect(track, 3);
+            using var trackBrush = new SolidBrush(Enabled ? Color.FromArgb(185, 195, 207) : Color.FromArgb(210, 216, 224));
+            e.Graphics.FillPath(trackBrush, trackPath);
+
+            if (activeWidth > 0)
+            {
+                var activeTrack = new Rectangle(track.Left, track.Top, activeWidth, track.Height);
+                using var activePath = RoundedRect(activeTrack, Math.Min(3, activeTrack.Width / 2));
+                using var activeBrush = new SolidBrush(Enabled ? Accent : Color.FromArgb(160, 178, 176));
+                e.Graphics.FillPath(activeBrush, activePath);
+            }
+
+            var thumb = new Rectangle(thumbCenterX - ThumbSize / 2, centerY - ThumbSize / 2, ThumbSize, ThumbSize);
+            using var shadowBrush = new SolidBrush(Color.FromArgb(35, 20, 30, 40));
+            e.Graphics.FillEllipse(shadowBrush, new Rectangle(thumb.X, thumb.Y + 1, thumb.Width, thumb.Height));
+            using var thumbBrush = new SolidBrush(Color.White);
+            using var thumbPen = new Pen(Focused ? Accent : hovering || dragging ? ControlPaint.Light(Accent, .18f) : Accent, Focused ? 2f : 1.5f);
+            e.Graphics.FillEllipse(thumbBrush, thumb);
+            e.Graphics.DrawEllipse(thumbPen, thumb);
+        }
+
+        private void SetValueFromMouse(int mouseX)
+        {
+            var usableWidth = Math.Max(1, Width - SidePadding * 2);
+            var clampedX = Math.Clamp(mouseX, SidePadding, SidePadding + usableWidth);
+            Value = (int)Math.Round((clampedX - SidePadding) * 100d / usableWidth);
         }
     }
 

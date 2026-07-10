@@ -3,6 +3,7 @@ import fs from 'fs'
 import path from 'path'
 import crypto from 'crypto'
 import { AppConfig, RouteId, SplitReminderSettings, UpstreamRoute, createRouteCatalog, loadAppConfig, normalizeAppConfig, normalizeSplitReminderSettings, routeById, saveAppConfig } from './appConfig'
+import { apolloChannelRegistrationPacket, apolloJsonPacket, enableApolloNametagMessage, overrideApolloNametagMessage, packetSignalsLunarClient, packetUnregistersApollo, resetAllApolloNametagsMessage, resetApolloNametagMessage } from './apollo'
 import { startDashboard } from './dashboard'
 import { MsaCode, microsoftAuthPrompt } from './microsoftAuthPrompt'
 
@@ -42,6 +43,7 @@ type AppLogEntry = {
 type SplitReminderState = {
   respawning: boolean
   splitPending: boolean
+  splitSignalId: number
   lastTrigger: string
   preRespawnTrigger: string
   preRespawnTriggerAt: number
@@ -109,6 +111,7 @@ const serverIcon = loadServerIcon()
 let upstreamStatusCache: UpstreamStatusSnapshot | null = null
 let upstreamStatusInFlight: Promise<UpstreamStatusSnapshot> | null = null
 let activeSessions = 0
+let splitSoundEventId = 0
 const VERSION_LABEL = (() => {
   try {
     return JSON.parse(fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf8')).version || '1.0.0'
@@ -410,6 +413,7 @@ function createSplitReminderState(): SplitReminderState {
   return {
     respawning: false,
     splitPending: false,
+    splitSignalId: 0,
     lastTrigger: '',
     preRespawnTrigger: '',
     preRespawnTriggerAt: 0,
@@ -428,6 +432,7 @@ function createSplitReminderState(): SplitReminderState {
 function resetSplitReminderMatchState(state: SplitReminderState, bedWarsGameActive = false, now = Date.now()) {
   state.respawning = false
   state.splitPending = false
+  state.splitSignalId = 0
   state.lastTrigger = ''
   state.preRespawnTrigger = ''
   state.preRespawnTriggerAt = 0
@@ -535,7 +540,8 @@ function updateBedWarsGameStateFromText(
   text: string,
   state: SplitReminderState,
   sessionState?: SessionState,
-  now = Date.now()
+  now = Date.now(),
+  localPlayerName?: string
 ): 'start' | 'end' | 'pregame' | null {
   const textMode = bedWarsTeamModeFromText(text)
   const event = bedWarsGameEvent(text)
@@ -560,7 +566,11 @@ function updateBedWarsGameStateFromText(
   const pendingSource = event === 'start'
     ? textMode ? `mode:${textMode.label}` : state.stableTeamMaxPlayersSource
     : textMode ? `mode:${textMode.label}` : ''
-  sessionState?.teams.clear()
+  if (event === 'start' || event === 'pregame') {
+    retainLocalBedWarsTabTeams(sessionState, localPlayerName)
+  } else {
+    sessionState?.teams.clear()
+  }
 
   if (event === 'start') {
     resetSplitReminderMatchState(state, true, now)
@@ -643,6 +653,39 @@ function addLocalTeamPlayersFromTabLetter(
   for (const player of state.playersByName.values()) {
     if (bedWarsTabTeamLetterFromPlayerInfo(player) !== letter) continue
     if (typeof player?.name === 'string') addLocalTeamPlayer(playersByKey, player.name)
+  }
+}
+
+function splitSoundStatus() {
+  return { eventId: splitSoundEventId }
+}
+
+function retainLocalBedWarsTabTeams(state?: SessionState, localPlayerName?: string) {
+  if (!state) return
+  if (!localPlayerName) {
+    state.teams.clear()
+    return
+  }
+
+  const localPlayer = state.playersByName.get(playerKey(localPlayerName))
+  const localLetter = localPlayerTeamCandidates(state, localPlayerName)
+    .map(bedWarsTabTeamLetter)
+    .find((letter): letter is string => !!letter)
+    || bedWarsTabTeamLetterFromPlayerInfo(localPlayer)
+
+  if (!localLetter) {
+    state.teams.clear()
+    return
+  }
+
+  for (const [teamName, team] of state.teams) {
+    const teamLetter = bedWarsTabTeamLetter(team)
+    const playerLetterMatches = Array.from(team.players).some(player => {
+      return bedWarsTabTeamLetterFromPlayerInfo(state.playersByName.get(playerKey(player))) === localLetter
+    })
+    if (teamLetter !== localLetter && !playerLetterMatches && !teamHasPlayer(team, localPlayerName)) {
+      state.teams.delete(teamName)
+    }
   }
 }
 
@@ -896,8 +939,19 @@ function maybeSettleTeamMaxPlayers(
   snapshot: LocalTeamSnapshot,
   now: number
 ) {
-  if (splitState.stableTeamMaxPlayers) return
   if (splitState.stableTeamMaxPlayersSource.startsWith('mode:')) return
+  if (splitState.stableTeamMaxPlayersSource === 'inferred' && splitState.stableTeamMaxPlayers) {
+    splitState.stableTeamMaxPlayers = Math.min(
+      MAX_BEDWARS_TEAM_PLAYERS,
+      Math.max(
+        splitState.stableTeamMaxPlayers,
+        snapshot.playersByKey.size,
+        splitState.stableTeamPlayersByKey.size
+      )
+    )
+    return
+  }
+  if (splitState.stableTeamMaxPlayers) return
   if (!splitState.bedWarsGameStartedAt || now - splitState.bedWarsGameStartedAt < BEDWARS_ROSTER_SETTLE_MS) return
   splitState.stableTeamMaxPlayers = Math.min(
     MAX_BEDWARS_TEAM_PLAYERS,
@@ -1131,7 +1185,7 @@ function withSplitReminderChatComponent(
   const text = flattenChatToText(comp)
   if (!text.trim()) return comp
 
-  if (updateBedWarsGameStateFromText(text, state, context.sessionState, now)) {
+  if (updateBedWarsGameStateFromText(text, state, context.sessionState, now, context.localPlayerName)) {
     return comp
   }
 
@@ -1142,6 +1196,7 @@ function withSplitReminderChatComponent(
     if (!state.respawning) {
       state.splitPending = preRespawnTriggerIsFresh
       state.lastTrigger = preRespawnTriggerIsFresh ? state.preRespawnTrigger : ''
+      if (preRespawnTriggerIsFresh) state.splitSignalId += 1
     }
     state.preRespawnTrigger = ''
     state.preRespawnTriggerAt = 0
@@ -1177,10 +1232,12 @@ function withSplitReminderChatComponent(
 
   if (state.respawning) {
     if (teammateDeath.match) {
+      const isNewTrigger = state.lastTrigger !== text
       state.splitPending = true
       state.lastTrigger = text
       state.preRespawnTrigger = ''
       state.preRespawnTriggerAt = 0
+      if (isNewTrigger) state.splitSignalId += 1
       return comp
     }
 
@@ -1247,14 +1304,15 @@ function withSplitReminderPacket(
   state: SplitReminderState,
   settings: SplitReminderSettings,
   now = Date.now(),
-  sessionState?: SessionState
+  sessionState?: SessionState,
+  localPlayerName?: string
 ): any {
   if (!packet || typeof packet !== 'object') return packet
   if (packetName !== 'title' && packetName !== 'set_title_text' && packetName !== 'set_title_subtitle' && packetName !== 'set_action_bar_text') {
     return packet
   }
 
-  if (updateBedWarsGameStateFromText(flattenChatToText(packet), state, sessionState, now)) {
+  if (updateBedWarsGameStateFromText(flattenChatToText(packet), state, sessionState, now, localPlayerName)) {
     return packet
   }
 
@@ -1471,48 +1529,195 @@ function nicknameForPlayer(name: unknown, nicknames: Map<string, string>): strin
   return nicknames.get(stripColors(name).toLowerCase()) || null
 }
 
-function nicknameForProfileName(name: unknown, nicknames: Map<string, string>): string | null {
-  const nickname = nicknameForPlayer(name, nicknames)
-  if (!nickname) return null
-  const clean = stripColors(nickname).trim()
-  return validPlayerName(clean) ? clean : null
+type LegacyComponentStyle = {
+  color?: string
+  bold?: boolean
+  italic?: boolean
+  underlined?: boolean
+  strikethrough?: boolean
+  obfuscated?: boolean
 }
 
-function localProfileName(name: string, nicknames: Map<string, string>): string {
-  return nicknameForProfileName(name, nicknames) || name
+const LEGACY_COMPONENT_COLORS: Record<string, string> = {
+  0: 'black',
+  1: 'dark_blue',
+  2: 'dark_green',
+  3: 'dark_aqua',
+  4: 'dark_red',
+  5: 'dark_purple',
+  6: 'gold',
+  7: 'gray',
+  8: 'dark_gray',
+  9: 'blue',
+  a: 'green',
+  b: 'aqua',
+  c: 'red',
+  d: 'light_purple',
+  e: 'yellow',
+  f: 'white'
+}
+
+function legacyFormattedComponent(text: string): any {
+  const runs: any[] = []
+  let style: LegacyComponentStyle = {}
+  let content = ''
+
+  const flush = () => {
+    if (!content) return
+    runs.push({ text: content, ...style })
+    content = ''
+  }
+
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] !== '\u00a7' || index + 1 >= text.length) {
+      content += text[index]
+      continue
+    }
+
+    const code = text[index + 1].toLowerCase()
+    const colorName = LEGACY_COMPONENT_COLORS[code]
+    if (colorName) {
+      flush()
+      style = { color: colorName }
+      index += 1
+      continue
+    }
+
+    const decoration: keyof LegacyComponentStyle | null = code === 'k'
+      ? 'obfuscated'
+      : code === 'l'
+        ? 'bold'
+        : code === 'm'
+          ? 'strikethrough'
+          : code === 'n'
+            ? 'underlined'
+            : code === 'o'
+              ? 'italic'
+              : null
+    if (decoration) {
+      flush()
+      style = { ...style, [decoration]: true }
+      index += 1
+      continue
+    }
+
+    if (code === 'r') {
+      flush()
+      style = {}
+      index += 1
+      continue
+    }
+
+    content += text[index]
+  }
+  flush()
+
+  if (!runs.length) return { text: '' }
+  if (runs.length === 1) return runs[0]
+  return { text: '', extra: runs }
+}
+
+function nicknameDisplayTeam(state: SessionState | undefined, playerName: string): TeamState | null {
+  if (!state) return null
+  const teams = Array.from(state.teams.values()).filter(team => teamHasPlayer(team, playerName))
+  teams.sort((left, right) => {
+    const leftFormatting = stripColors(`${left.prefix}${left.suffix}`).length
+    const rightFormatting = stripColors(`${right.prefix}${right.suffix}`).length
+    if (leftFormatting !== rightFormatting) return rightFormatting - leftFormatting
+    if (left.players.size !== right.players.size) return left.players.size - right.players.size
+    return left.team.localeCompare(right.team)
+  })
+  return teams[0] || null
+}
+
+function rewrittenPlayerDisplayComponent(player: any, nicknames: Map<string, string>): any | null {
+  const original = typeof player?.displayName === 'string' ? player.displayName : null
+  if (!original) return null
+
+  try {
+    const parsed = JSON.parse(original)
+    const rewritten = replaceNamesInChat(parsed, nicknames)
+    return JSON.stringify(rewritten) === JSON.stringify(parsed) ? null : rewritten
+  } catch {
+    const rewritten = replaceNames(original, nicknames)
+    return rewritten === original ? null : legacyFormattedComponent(rewritten)
+  }
+}
+
+function teamNicknameComponent(player: any, nickname: string, state?: SessionState): any | null {
+  if (typeof player?.name !== 'string') return null
+  const team = nicknameDisplayTeam(state, player.name)
+  if (!team) return null
+  return legacyFormattedComponent(`${team.prefix}${nickname}${team.suffix}`)
+}
+
+function localPlayerDisplayComponent(player: any, nicknames: Map<string, string>, state?: SessionState): any | null {
+  const nickname = nicknameForPlayer(player?.name, nicknames)
+  if (!nickname) return null
+  return rewrittenPlayerDisplayComponent(player, nicknames)
+    || teamNicknameComponent(player, nickname, state)
+    || { text: nickname }
+}
+
+function localPlayerNametagComponent(player: any, nicknames: Map<string, string>, state?: SessionState): any | null {
+  const nickname = nicknameForPlayer(player?.name, nicknames)
+  if (!nickname) return null
+  return teamNicknameComponent(player, nickname, state)
+    || rewrittenPlayerDisplayComponent(player, nicknames)
+    || { text: nickname }
+}
+
+function localPlayerDisplayName(player: any, nicknames: Map<string, string>, state?: SessionState): string | null {
+  const original = typeof player?.displayName === 'string' ? player.displayName : null
+  const component = localPlayerDisplayComponent(player, nicknames, state)
+  if (!component) return original
+
+  return JSON.stringify(component)
 }
 
 function isAction(action: unknown, text: string, id: number): boolean {
   return action === text || action === id
 }
 
-function withNicknamePlayerInfo(packet: any, nicknames: Map<string, string>): any {
+function playerInfoMayChangeBedWarsRoster(packet: any): boolean {
+  return isAction(packet?.action, 'add_player', 0)
+    || isAction(packet?.action, 'update_display_name', 3)
+    || isAction(packet?.action, 'remove_player', 4)
+}
+
+function shouldExtendTransferWatchFromChunk(
+  splitState: SplitReminderState,
+  transferWatch: TransferWatchState
+): boolean {
+  return !splitState.bedWarsGameActive || transferWatch.active
+}
+
+function playerInfoProfile(player: any, state?: SessionState): any | null {
+  if (typeof player?.name === 'string') return player
+  if (!state) return null
+  const key = state.playerNameByUuid.get(uuidKey(player?.uuid))
+  return key ? state.playersByName.get(key) || null : null
+}
+
+function withNicknamePlayerInfo(packet: any, nicknames: Map<string, string>, state?: SessionState): any {
   const players = Array.isArray(packet?.data) ? packet.data : null
   if (!players) return packet
 
   const addPlayer = isAction(packet.action, 'add_player', 0)
   const updatesDisplayName = addPlayer || isAction(packet.action, 'update_display_name', 3)
+  if (!updatesDisplayName) return packet
+
   let changed = false
   const nextPlayers = players.map((player: any) => {
-    let next = player
-    if (addPlayer && typeof player?.name === 'string') {
-      const localName = nicknameForProfileName(player.name, nicknames)
-      if (localName && localName !== player.name) {
-        next = { ...next, name: localName }
-        changed = true
-      }
-    }
+    const profile = playerInfoProfile(player, state)
+    if (!profile) return player
 
-    if (updatesDisplayName && typeof player?.displayName === 'string') {
-      const displayName = replaceNamesInChatString(player.displayName, nicknames)
-      if (displayName !== player.displayName) {
-        next = next === player ? { ...next } : next
-        next.displayName = displayName
-        changed = true
-      }
-    }
+    const displayName = localPlayerDisplayName(profile, nicknames, state)
+    const packetDisplayName = typeof player?.displayName === 'string' ? player.displayName : null
+    if (displayName === packetDisplayName) return player
 
-    return next
+    changed = true
+    return { ...player, displayName }
   })
 
   if (!changed) return packet
@@ -1520,34 +1725,11 @@ function withNicknamePlayerInfo(packet: any, nicknames: Map<string, string>): an
 }
 
 function withNicknameScoreboardTeam(packet: any, nicknames: Map<string, string>): any {
-  let changed = false
-  const next: any = { ...packet }
-
-  if (Array.isArray(packet.players)) {
-    next.players = packet.players.map((player: string) => {
-      const localName = localProfileName(player, nicknames)
-      if (localName !== player) changed = true
-      return localName
-    })
-  }
-
-  if (Array.isArray(packet.entities)) {
-    next.entities = packet.entities.map((entity: string) => {
-      const localName = localProfileName(entity, nicknames)
-      if (localName !== entity) changed = true
-      return localName
-    })
-  }
-
-  return changed ? next : packet
+  return packet
 }
 
 function withNicknameScoreboardScore(packet: any, nicknames: Map<string, string>): any {
-  if (typeof packet?.itemName !== 'string') return packet
-
-  const itemName = localProfileName(packet.itemName, nicknames)
-  if (itemName === packet.itemName) return packet
-  return { ...packet, itemName }
+  return packet
 }
 
 function withNicknameMetadata(metadata: any, nicknames: Map<string, string>): any {
@@ -1647,10 +1829,6 @@ function teamPlayers(packet: any): string[] {
   return []
 }
 
-function rewrittenTeamPlayers(players: Set<string>, nicknames: Map<string, string>): Set<string> {
-  return new Set(Array.from(players, player => localProfileName(player, nicknames)))
-}
-
 function trackScoreboardTeam(packetName: string, packet: any, state: SessionState, nicknames: Map<string, string>) {
   if (typeof packet?.team !== 'string') return
 
@@ -1677,7 +1855,7 @@ function trackScoreboardTeam(packetName: string, packet: any, state: SessionStat
     for (const player of teamPlayers(packet)) team.players.delete(player)
   }
 
-  team.sentPlayers = rewrittenTeamPlayers(team.players, nicknames)
+  team.sentPlayers = new Set(team.players)
 }
 
 function teamColorName(team: TeamState): string | null {
@@ -1851,59 +2029,91 @@ function logBedWarsModeIfChanged(splitState: SplitReminderState, mode: { label: 
   term('QoL', `Mode detected: ${mode.label} (team cap ${mode.maxPlayers}).`, colors.yellow)
 }
 
-function sendTeamPlayerDiff(downstream: ServerClient, team: TeamState, nextPlayers: Set<string>) {
-  const toRemove = Array.from(team.sentPlayers).filter(player => !nextPlayers.has(player))
-  const toAdd = Array.from(nextPlayers).filter(player => !team.sentPlayers.has(player))
-
-  if (toRemove.length) {
-    downstream.write(team.packetName, { team: team.team, mode: 4, players: toRemove })
+function writeApolloJson(downstream: ServerClient, message: Record<string, unknown>): boolean {
+  try {
+    downstream.write('custom_payload', apolloJsonPacket(message))
+    return true
+  } catch {
+    return false
   }
-  if (toAdd.length) {
-    downstream.write(team.packetName, { team: team.team, mode: 3, players: toAdd })
-  }
-
-  team.sentPlayers = nextPlayers
 }
 
-function refreshLocalNicknames(downstream: ServerClient, state: SessionState, nicknames: Map<string, string>) {
-  for (const player of state.playersByName.values()) {
+function refreshNicknameTabPlayers(
+  downstream: ServerClient,
+  state: SessionState,
+  nicknames: Map<string, string>,
+  playerNames: Iterable<string>
+) {
+  const refreshed = new Set<string>()
+  for (const playerName of playerNames) {
+    const key = playerKey(playerName)
+    if (!key || refreshed.has(key)) continue
+    refreshed.add(key)
+
+    const player = state.playersByName.get(key)
+    if (!player || !nicknameForPlayer(player.name, nicknames)) continue
     try {
       downstream.write('player_info', {
-        action: 'remove_player',
-        data: [{ uuid: player.uuid }]
+        action: 'update_display_name',
+        data: [{
+          uuid: player.uuid,
+          displayName: localPlayerDisplayName(player, nicknames, state)
+        }]
       })
-      downstream.write('player_info', withNicknamePlayerInfo({
-        action: 'add_player',
-        data: [player]
-      }, nicknames))
     } catch {}
   }
+}
 
-  for (const team of state.teams.values()) {
-    try {
-      sendTeamPlayerDiff(downstream, team, rewrittenTeamPlayers(team.players, nicknames))
-    } catch {}
+function refreshApolloNametags(
+  downstream: ServerClient,
+  state: SessionState,
+  nicknames: Map<string, string>,
+  playerName?: string,
+  resetAll = false
+) {
+  if (resetAll) writeApolloJson(downstream, resetAllApolloNametagsMessage())
+  const targetKey = playerName ? playerKey(playerName) : ''
+
+  for (const player of state.playersByName.values()) {
+    if (targetKey && playerKey(player?.name || '') !== targetKey) continue
+    const component = localPlayerNametagComponent(player, nicknames, state)
+    if (!component) {
+      if (targetKey) writeApolloJson(downstream, resetApolloNametagMessage(player.uuid))
+      continue
+    }
+    writeApolloJson(downstream, overrideApolloNametagMessage(player.uuid, component))
   }
+}
 
-  for (const score of state.scores.values()) {
+function refreshLocalNicknames(
+  downstream: ServerClient,
+  state: SessionState,
+  nicknames: Map<string, string>,
+  playerName?: string
+) {
+  const targetKey = playerName ? playerKey(playerName) : ''
+
+  for (const player of state.playersByName.values()) {
+    if (targetKey && playerKey(player?.name || '') !== targetKey) continue
     try {
-      const rewritten = withNicknameScoreboardScore(score, nicknames)
-      if (rewritten !== score) {
-        downstream.write('scoreboard_score', rewritten)
-      }
+      downstream.write('player_info', {
+        action: 'update_display_name',
+        data: [{
+          uuid: player.uuid,
+          displayName: localPlayerDisplayName(player, nicknames, state)
+        }]
+      })
     } catch {}
   }
 
   for (const entity of state.playerEntitiesByUuid.values()) {
+    const entityPlayerKey = state.playerNameByUuid.get(entity.uuid) || ''
+    if (targetKey && entityPlayerKey !== targetKey) continue
     try {
-      downstream.write('entity_destroy', { entityIds: [entity.entityId] })
-      downstream.write('named_entity_spawn', withNicknameNamedEntitySpawn({
-        ...entity.spawnPacket,
-        metadata: entity.metadata
-      }, nicknames))
-      for (const equipment of Array.from(entity.equipment.values()).sort((a, b) => a.slot - b.slot)) {
-        downstream.write('entity_equipment', equipment)
-      }
+      downstream.write('entity_metadata', {
+        entityId: entity.entityId,
+        metadata: withNicknameMetadata(entity.metadata, nicknames)
+      })
     } catch {}
   }
 }
@@ -2194,6 +2404,52 @@ function bridgePlay(
     active: false,
     expiresAt: 0
   }
+  const apolloNickname = {
+    supported: false,
+    channelAnnounced: false,
+    configured: false,
+    clientJoinedWorld: false
+  }
+
+  const configureApolloNicknames = () => {
+    if (!apolloNickname.supported || !apolloNickname.channelAnnounced || apolloNickname.configured) return
+    if (!writeApolloJson(downstream, enableApolloNametagMessage())) return
+    refreshApolloNametags(downstream, sessionState, nicknames, undefined, true)
+    apolloNickname.configured = true
+    term('Nick', 'Lunar nametag support enabled.', colors.green)
+  }
+
+  const announceApolloJsonChannel = () => {
+    if (apolloNickname.channelAnnounced || !apolloNickname.clientJoinedWorld || downstream.state !== 'play') return
+    try {
+      downstream.write('custom_payload', apolloChannelRegistrationPacket())
+      apolloNickname.channelAnnounced = true
+      configureApolloNicknames()
+    } catch {}
+  }
+
+  const activateApolloNicknames = () => {
+    if (apolloNickname.supported) return
+    apolloNickname.supported = true
+    announceApolloJsonChannel()
+    configureApolloNicknames()
+  }
+
+  const refreshApolloPlayers = (playerNames: Iterable<string>) => {
+    if (!apolloNickname.configured) return
+    const refreshed = new Set<string>()
+    for (const playerName of playerNames) {
+      const key = playerKey(playerName)
+      if (!key || refreshed.has(key)) continue
+      refreshed.add(key)
+      refreshApolloNametags(downstream, sessionState, nicknames, playerName)
+    }
+  }
+
+  downstream.on('state', state => {
+    if (state === 'play') announceApolloJsonChannel()
+  })
+  announceApolloJsonChannel()
 
   const startTransferWatch = () => {
     transferWatch.active = true
@@ -2225,6 +2481,15 @@ function bridgePlay(
     logLocalTeamIfChanged(sessionState, downstream.username, splitReminderState)
   }
 
+  const analyzeTeamAfterGameStart = (previousGameStartedAt: number) => {
+    if (!splitReminderState.bedWarsGameActive) return
+    if (splitReminderState.bedWarsGameStartedAt === previousGameStartedAt) return
+
+    // The transfer guard should not hide the new match roster for 20 seconds.
+    transferWatch.active = false
+    analyzeScoreboard(true)
+  }
+
   upstream.on('raw', (buffer: Buffer, meta: any) => {
     if (upstream.state !== 'play' || downstream.state !== 'play') return
     const packetName = String(meta?.name || '')
@@ -2232,7 +2497,9 @@ function bridgePlay(
 
     try {
       downstream.writeRaw(buffer)
-      startTransferWatch()
+      if (shouldExtendTransferWatchFromChunk(splitReminderState, transferWatch)) {
+        startTransferWatch()
+      }
     } catch (error) {
       term('Bridge', `Dropped raw upstream packet ${String(meta?.name || 'unknown')}: ${errorMessage(error)}`, colors.red)
     }
@@ -2246,7 +2513,6 @@ function bridgePlay(
       if (meta.name === 'login' || meta.name === 'respawn') {
         startTransferWatch()
       }
-
       if (meta.name === 'chat') {
         const raw = (data as any).message
         const position = (data as any).position ?? 0
@@ -2258,7 +2524,9 @@ function bridgePlay(
           }
         })()
         const now = Date.now()
+        const gameStartedAtBeforeChat = splitReminderState.bedWarsGameStartedAt
         const pendingBeforeChat = splitReminderState.splitPending
+        const splitSignalBeforeChat = splitReminderState.splitSignalId
         withSplitReminderChatComponent(
           comp,
           splitReminderState,
@@ -2270,6 +2538,10 @@ function bridgePlay(
             log: message => term('QoL', message, colors.yellow)
           }
         )
+        analyzeTeamAfterGameStart(gameStartedAtBeforeChat)
+        if (splitReminderState.splitPending && splitReminderState.splitSignalId !== splitSignalBeforeChat) {
+          splitSoundEventId += 1
+        }
         const withNicknames = replaceNamesInChat(comp, nicknames)
         if (!pendingBeforeChat && splitReminderState.splitPending) {
           term('QoL', `Split armed by ${splitReminderState.lastTrigger}.`, colors.yellow)
@@ -2298,9 +2570,19 @@ function bridgePlay(
       }
 
       if (meta.name === 'title' || meta.name === 'set_title_text' || meta.name === 'set_title_subtitle' || meta.name === 'set_action_bar_text') {
+        const gameStartedAtBeforeTitle = splitReminderState.bedWarsGameStartedAt
         const pendingBeforeTitle = splitReminderState.splitPending
         const trigger = splitReminderState.lastTrigger
-        const updated = withSplitReminderPacket(meta.name, data, splitReminderState, appConfig.splitReminder, Date.now(), sessionState)
+        const updated = withSplitReminderPacket(
+          meta.name,
+          data,
+          splitReminderState,
+          appConfig.splitReminder,
+          Date.now(),
+          sessionState,
+          downstream.username
+        )
+        analyzeTeamAfterGameStart(gameStartedAtBeforeTitle)
         if (pendingBeforeTitle && JSON.stringify(updated) !== JSON.stringify(data)) {
           term('QoL', `Split title shown from ${trigger || 'teammate death'}.`, colors.yellow)
           writeSplitTitleTiming(downstream, meta.name)
@@ -2353,15 +2635,30 @@ function bridgePlay(
       }
 
       if (meta.name === 'player_info') {
+        const rosterMayHaveChanged = playerInfoMayChangeBedWarsRoster(data)
         trackPlayerInfo(data, sessionState)
-        downstream.write(meta.name, withNicknamePlayerInfo(data, nicknames))
+        if (rosterMayHaveChanged) analyzeScoreboard(true)
+        downstream.write(meta.name, withNicknamePlayerInfo(data, nicknames, sessionState))
+        const playerNames = (Array.isArray((data as any)?.data) ? (data as any).data : [])
+          .map((player: any) => playerInfoProfile(player, sessionState)?.name)
+          .filter((name: unknown): name is string => typeof name === 'string')
+        refreshApolloPlayers(playerNames)
         return
       }
 
       if (meta.name === 'scoreboard_team' || meta.name === 'teams') {
+        const previousPlayers = typeof (data as any)?.team === 'string'
+          ? Array.from(sessionState.teams.get((data as any).team)?.players || [])
+          : []
         trackScoreboardTeam(meta.name, data, sessionState, nicknames)
         analyzeScoreboard()
         downstream.write(meta.name, withNicknameScoreboardTeam(data, nicknames))
+        const currentPlayers = typeof (data as any)?.team === 'string'
+          ? Array.from(sessionState.teams.get((data as any).team)?.players || [])
+          : []
+        const affectedPlayers = [...previousPlayers, ...teamPlayers(data), ...currentPlayers]
+        refreshNicknameTabPlayers(downstream, sessionState, nicknames, affectedPlayers)
+        refreshApolloPlayers(affectedPlayers)
         return
       }
 
@@ -2419,16 +2716,35 @@ function bridgePlay(
       }
 
       downstream.write(meta.name, data)
+      if (meta.name === 'login') {
+        apolloNickname.clientJoinedWorld = true
+        announceApolloJsonChannel()
+      }
     } catch (error) {
       term('Bridge', `Dropped upstream packet ${meta.name}: ${errorMessage(error)}`, colors.red)
     }
   })
 
   downstream.on('packet', (data, meta) => {
+    if (meta.name === 'custom_payload') {
+      if (packetSignalsLunarClient(data)) {
+        activateApolloNicknames()
+      } else if (packetUnregistersApollo(data)) {
+        apolloNickname.supported = false
+        apolloNickname.configured = false
+      }
+    }
+
     if (downstream.state !== 'play' || upstream.state !== 'play') return
 
     if (meta.name === 'chat') {
       const message = String((data as any).message || '')
+
+      if (/^\s*\/splitsound\s*$/i.test(message)) {
+        splitSoundEventId += 1
+        sendClientChat(downstream, { text: '[QoL] Split sound sent to the launcher.', color: 'yellow' })
+        return
+      }
 
       if (/^\s*\/nicknames\b/i.test(message)) {
         const rows = Array.from(nicknames.entries()).sort()
@@ -2445,7 +2761,10 @@ function bridgePlay(
         const key = clearMatch[1].toLowerCase()
         if (nicknames.delete(key)) {
           saveNicknames(nicknames)
-          refreshLocalNicknames(downstream, sessionState, nicknames)
+          refreshLocalNicknames(downstream, sessionState, nicknames, clearMatch[1])
+          if (apolloNickname.configured) {
+            refreshApolloNametags(downstream, sessionState, nicknames, undefined, true)
+          }
           sendClientChat(downstream, okChat(`Tog bort nickname for ${clearMatch[1]}.`))
         } else {
           sendClientChat(downstream, infoChat(`${clearMatch[1]} hade ingen nickname.`))
@@ -2462,11 +2781,11 @@ function bridgePlay(
 
         nicknames.set(nickname.player.toLowerCase(), stripColors(nickname.nickname))
         saveNicknames(nicknames)
-        refreshLocalNicknames(downstream, sessionState, nicknames)
-        sendClientChat(downstream, okChat(`${nickname.player} visas som ${nickname.nickname}.`))
-        if (!nicknameForProfileName(nickname.player, nicknames)) {
-          sendClientChat(downstream, infoChat('Nametag-byte kraver ett nickname med 1-16 tecken: A-Z, 0-9 eller _.'))
+        refreshLocalNicknames(downstream, sessionState, nicknames, nickname.player)
+        if (apolloNickname.configured) {
+          refreshApolloNametags(downstream, sessionState, nicknames, nickname.player)
         }
+        sendClientChat(downstream, okChat(`${nickname.player} visas lokalt som ${nickname.nickname}.`))
         return
       }
 
@@ -2519,9 +2838,16 @@ export const __test = {
   isLobbySelectorWindowTitle,
   lobbyCommandKey,
   lobbyWindowClickKey,
+  legacyFormattedComponent,
+  localPlayerNametagComponent,
   localPlayerTeam,
   localTeammateNames,
+  playerInfoMayChangeBedWarsRoster,
+  shouldExtendTransferWatchFromChunk,
+  refreshApolloNametags,
+  refreshNicknameTabPlayers,
   refreshLocalNicknames,
+  replaceNamesInChat,
   serverListDescription,
   serverListPlayers,
   serverListStatusResponse,
@@ -2601,6 +2927,7 @@ export function startProxy(): Server {
     host: DASHBOARD_HOST,
     port: DASHBOARD_PORT,
     getStatus: dashboardStatus,
+    getSplitSoundStatus: splitSoundStatus,
     setRoute,
     setSplitReminderEnabled,
     shutdown: () => shutdown('Shutdown requested from app.')

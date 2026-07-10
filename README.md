@@ -100,11 +100,13 @@ These commands are local. They are not sent to Hypixel.
 
 Nicknames are saved in `state/nicknames.json`.
 
+Nicknames are display-only aliases. The proxy keeps each player's real profile name, UUID, skin data, scoreboard identity, and team membership unchanged so capes and external stat tools continue to identify the real player. Chat and TAB replace only the name portion and keep Hypixel's existing rank/team prefix, colors, and suffix. On Lunar Client, the proxy also uses Apollo's UUID-targeted Nametag module for the nameplate above the player; clients without Apollo keep the original Minecraft nameplate.
+
 ## Split Reminder
 
-The local split reminder watches incoming chat for your respawn window and teammate death messages. It only rewrites the center title: if a teammate dies while you are waiting to respawn, the next `RESPAWNED!` title is shown locally as `SPLIT!`.
+The local split reminder watches incoming chat for your respawn window and teammate death messages. If a teammate dies while you are waiting to respawn, the Windows app plays the embedded Minecraft pling notification and the next `RESPAWNED!` title is shown locally as `SPLIT!`. The app audio is independent of Minecraft's Jukebox/Note Blocks volume. Its volume slider and `Test sound` button are available in the QoL drawer, and the selected volume is saved in `state/launcher-settings.json`.
 
-This does not send anything extra to Hypixel. It is a local rewrite only. The app can turn it on/off and adjust the respawn window. Advanced pattern settings are saved in `state/app-config.json`.
+Use `/splitsound` in Minecraft to test the sound without sending the command to Hypixel. The app can turn the reminder on/off, and advanced pattern settings are saved in `state/app-config.json`.
 
 ## Config
 

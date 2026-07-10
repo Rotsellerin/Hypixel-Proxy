@@ -13,6 +13,7 @@
   <ItemGroup>
     <EmbeddedResource Include="Assets\hypixel-proxy-logo.png" LogicalName="HypixelProxy.App.Assets.HypixelProxyLogo.png" />
     <EmbeddedResource Include="Assets\hypixel-proxy-logo.ico" LogicalName="HypixelProxy.App.Assets.HypixelProxyLogo.ico" />
+    <EmbeddedResource Include="Assets\split-pling.wav" LogicalName="HypixelProxy.App.Assets.SplitPling.wav" />
   </ItemGroup>
 
 </Project>

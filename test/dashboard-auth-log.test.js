@@ -25,6 +25,7 @@ async function main () {
         player: 'Steve'
       }]
     }),
+    getSplitSoundStatus: () => ({ eventId: 7 }),
     setRoute: () => ({}),
     setSplitReminderEnabled: () => ({}),
     shutdown: () => {
@@ -46,6 +47,9 @@ async function main () {
     assert.equal(status.logs[0].kind, 'microsoft_auth')
     assert.equal(status.logs[0].url, 'https://microsoft.com/link')
     assert.equal(status.logs[0].code, 'ABC123')
+
+    const splitSound = await fetch(`${baseUrl}/api/split-sound`).then(res => res.json())
+    assert.equal(splitSound.eventId, 7)
 
     const shutdown = await fetch(`${baseUrl}/api/shutdown`, { method: 'POST' }).then(res => res.json())
     assert.equal(shutdown.ok, true)
