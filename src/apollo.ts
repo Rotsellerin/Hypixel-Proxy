@@ -6,6 +6,12 @@ const UNREGISTER_CHANNELS = new Set(['unregister', 'minecraft:unregister'])
 
 export type ApolloJsonMessage = Record<string, unknown>
 
+function stringifyAsciiJson(value: unknown): string {
+  return JSON.stringify(value).replace(/[\u0080-\uffff]/g, character => {
+    return `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`
+  })
+}
+
 function pluginChannelNames(data: unknown): string[] {
   if (Array.isArray(data)) {
     return data.flatMap(pluginChannelNames)
@@ -88,11 +94,12 @@ export function enableApolloNametagMessage(): ApolloJsonMessage {
   }
 }
 
-export function overrideApolloNametagMessage(uuid: unknown, line: unknown): ApolloJsonMessage {
+export function overrideApolloNametagMessage(uuid: unknown, lineOrLines: unknown): ApolloJsonMessage {
+  const lines = Array.isArray(lineOrLines) ? lineOrLines : [lineOrLines]
   return {
     '@type': 'type.googleapis.com/lunarclient.apollo.nametag.v1.OverrideNametagMessage',
     player_uuid: apolloUuid(uuid),
-    adventure_json_lines: [JSON.stringify(line)]
+    adventure_json_lines: lines.map(line => JSON.stringify(line))
   }
 }
 
@@ -112,6 +119,6 @@ export function resetAllApolloNametagsMessage(): ApolloJsonMessage {
 export function apolloJsonPacket(message: ApolloJsonMessage): { channel: string; data: Buffer } {
   return {
     channel: APOLLO_JSON_CHANNEL,
-    data: Buffer.from(JSON.stringify(message), 'utf8')
+    data: Buffer.from(stringifyAsciiJson(message), 'ascii')
   }
 }

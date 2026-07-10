@@ -575,6 +575,66 @@ assert.deepEqual(
   ['NewMate', localPlayer]
 )
 
+const modeTransitionSession = __test.createSessionState()
+const modeTransitionState = __test.createSplitReminderState()
+setModeText(modeTransitionState, 'Mode: 3v3v3v3')
+markGameStarted(modeTransitionState)
+assert.equal(modeTransitionState.stableTeamMaxPlayers, 3)
+__test.trackScoreboardDisplayObjective({ position: 1, name: 'old-sidebar' }, modeTransitionSession)
+__test.trackScoreboardScore({
+  itemName: 'Mode: 3v3v3v3',
+  scoreName: 'old-sidebar',
+  value: 1
+}, modeTransitionSession)
+__test.updateBedWarsModeFromScoreboard(modeTransitionSession, modeTransitionState, 1000)
+__test.trackScoreboardDisplayObjective({ position: 1, name: 'new-sidebar' }, modeTransitionSession)
+__test.trackScoreboardScore({
+  itemName: 'Starting in 20s',
+  scoreName: 'new-sidebar',
+  value: 1
+}, modeTransitionSession)
+assert.equal(__test.updateBedWarsModeFromScoreboard(modeTransitionSession, modeTransitionState, 5000), null)
+assert.equal(modeTransitionState.stableTeamMaxPlayers, 0)
+__test.trackScoreboardScore({
+  itemName: 'Mode: 4v4v4v4',
+  scoreName: 'new-sidebar',
+  value: 2
+}, modeTransitionSession)
+assert.deepEqual(__test.updateBedWarsModeFromScoreboard(modeTransitionSession, modeTransitionState, 5100), {
+  label: '4v4v4v4',
+  maxPlayers: 4
+})
+__test.trackScoreboardScore({
+  itemName: 'Starting in 1s',
+  scoreName: 'new-sidebar',
+  value: 3
+}, modeTransitionSession)
+assert.equal(__test.updateBedWarsModeFromScoreboard(modeTransitionSession, modeTransitionState, 5200), null)
+assert.equal(modeTransitionState.stableTeamMaxPlayers, 4)
+__test.withSplitReminderPacket('title', {
+  text: JSON.stringify({ text: 'Protect your bed and destroy the enemy beds.' })
+}, modeTransitionState, settings, 6000, modeTransitionSession, localPlayer)
+assert.equal(modeTransitionState.stableTeamMaxPlayers, 4)
+assert.equal(modeTransitionState.stableTeamMaxPlayersSource, 'mode:4v4v4v4')
+assert.equal(__test.updateBedWarsModeFromScoreboard(modeTransitionSession, modeTransitionState, 6100), null)
+assert.equal(modeTransitionState.stableTeamMaxPlayers, 4)
+__test.trackScoreboardTeam('scoreboard_team', {
+  team: 'blue-local',
+  mode: 0,
+  prefix: '\u00a79B ',
+  players: [localPlayer]
+}, modeTransitionSession, new Map())
+__test.trackScoreboardTeam('scoreboard_team', {
+  team: 'blue-team',
+  mode: 0,
+  prefix: '\u00a79B ',
+  players: ['MateOne', 'MateTwo', 'MateThree']
+}, modeTransitionSession, new Map())
+assert.deepEqual(
+  __test.localTeammateNames(modeTransitionSession, localPlayer, modeTransitionState, 6500),
+  ['MateOne', 'MateThree', 'MateTwo', localPlayer]
+)
+
 const threesSession = __test.createSessionState()
 const threesState = __test.createSplitReminderState()
 setModeText(threesState, 'Mode: 3v3v3v3')

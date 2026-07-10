@@ -61,6 +61,19 @@ const overrideMessage = overrideApolloNametagMessage(uuid, line)
 assert.equal(overrideMessage['@type'], 'type.googleapis.com/lunarclient.apollo.nametag.v1.OverrideNametagMessage')
 assert.deepEqual(overrideMessage.player_uuid, uuidParts)
 assert.deepEqual(JSON.parse(overrideMessage.adventure_json_lines[0]), line)
+const healthLine = { text: '', extra: [{ text: '20', color: 'white' }, { text: ' \u2764', color: 'red' }] }
+const multiLineOverride = overrideApolloNametagMessage(uuid, [healthLine, line])
+assert.equal(multiLineOverride.adventure_json_lines.length, 2)
+assert.deepEqual(JSON.parse(multiLineOverride.adventure_json_lines[0]), healthLine)
+assert.deepEqual(JSON.parse(multiLineOverride.adventure_json_lines[1]), line)
+const heartPacket = apolloJsonPacket(multiLineOverride)
+const heartPacketText = heartPacket.data.toString('ascii')
+assert.match(heartPacketText, /\\u2764/)
+assert.equal(heartPacket.data.includes(Buffer.from([0xe2, 0x9d, 0xa4])), false)
+assert.deepEqual(
+  JSON.parse(JSON.parse(heartPacketText).adventure_json_lines[0]),
+  healthLine
+)
 assert.equal(resetApolloNametagMessage(uuid)['@type'], 'type.googleapis.com/lunarclient.apollo.nametag.v1.ResetNametagMessage')
 assert.equal(resetAllApolloNametagsMessage()['@type'], 'type.googleapis.com/lunarclient.apollo.nametag.v1.ResetNametagsMessage')
 
@@ -146,3 +159,38 @@ assert.equal(writes[0].params.channel, APOLLO_JSON_CHANNEL)
 const sentOverride = JSON.parse(writes[0].params.data.toString('utf8'))
 assert.equal(sentOverride['@type'], 'type.googleapis.com/lunarclient.apollo.nametag.v1.OverrideNametagMessage')
 assert.equal(flatten(JSON.parse(sentOverride.adventure_json_lines[0])), '[MVP+] Bollen [S1]')
+
+__test.trackScoreboardDisplayObjective({ position: 2, name: 'health' }, state)
+__test.trackScoreboardScore({
+  itemName: '998r',
+  action: 0,
+  scoreName: 'health',
+  value: 20
+}, state)
+
+const nametagLines = __test.localPlayerNametagLines(profile, nicknames, state)
+assert.equal(nametagLines.length, 2)
+assert.deepEqual(nametagLines[0], healthLine)
+assert.equal(flatten(nametagLines[1]), '[MVP+] Bollen [S1]')
+
+writes.length = 0
+__test.refreshApolloNametags({
+  write (name, params) {
+    writes.push({ name, params })
+  }
+}, state, nicknames, '998r')
+const sentHealthOverride = JSON.parse(writes[0].params.data.toString('utf8'))
+assert.equal(sentHealthOverride.adventure_json_lines.length, 2)
+assert.deepEqual(JSON.parse(sentHealthOverride.adventure_json_lines[0]), healthLine)
+assert.equal(flatten(JSON.parse(sentHealthOverride.adventure_json_lines[1])), '[MVP+] Bollen [S1]')
+
+__test.trackScoreboardScore({
+  itemName: '998r',
+  action: 0,
+  scoreName: 'health',
+  value: 14
+}, state)
+assert.equal(flatten(__test.localPlayerNametagLines(profile, nicknames, state)[0]), '14 \u2764')
+
+__test.trackScoreboardObjective({ name: 'health', action: 1 }, state)
+assert.equal(__test.localPlayerNametagLines(profile, nicknames, state).length, 1)

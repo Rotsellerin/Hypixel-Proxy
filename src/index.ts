@@ -15,6 +15,7 @@ type SessionState = {
   playerEntitiesByUuid: Map<string, PlayerEntityState>
   playerEntityUuidById: Map<number, string>
   scores: Map<string, any>
+  displayedScoreboardObjectives: Map<number, string>
 }
 type TeamState = {
   team: string
@@ -55,6 +56,7 @@ type SplitReminderState = {
   lastModeLogSignature: string
   bedWarsGameStartedAt: number
   bedWarsPregameSeenAt: number
+  bedWarsScoreboardCountdownVisible: boolean
   bedWarsGameActive: boolean
 }
 type SplitReminderContext = {
@@ -427,6 +429,7 @@ function createSplitReminderState(): SplitReminderState {
     lastModeLogSignature: '',
     bedWarsGameStartedAt: 0,
     bedWarsPregameSeenAt: 0,
+    bedWarsScoreboardCountdownVisible: false,
     bedWarsGameActive: false
   }
 }
@@ -445,6 +448,7 @@ function resetSplitReminderMatchState(state: SplitReminderState, bedWarsGameActi
   state.stableTeamMaxPlayersSource = ''
   state.bedWarsGameStartedAt = bedWarsGameActive ? now : 0
   state.bedWarsPregameSeenAt = 0
+  state.bedWarsScoreboardCountdownVisible = false
   state.bedWarsGameActive = bedWarsGameActive
 }
 
@@ -496,6 +500,12 @@ function bedWarsGameEvent(text: string): 'start' | 'end' | 'pregame' | null {
   return null
 }
 
+function isBedWarsPregameCountdown(text: string): boolean {
+  const clean = stripColors(text).replace(/\s+/g, ' ').trim()
+  return /\bThe game starts in \d+ seconds?\b/i.test(clean)
+    || /\bStarting in \d+\s*(?:s|seconds?)\b/i.test(clean)
+}
+
 function bedWarsTeamModeFromText(text: string): { label: string; maxPlayers: number } | null {
   const clean = stripColors(text)
   if (/\b4v4v4v4\b/i.test(clean)) return { label: '4v4v4v4', maxPlayers: 4 }
@@ -522,7 +532,6 @@ function applyBedWarsTeamModeFromText(
 
   const source = `mode:${mode.label}`
   if (
-    state.bedWarsGameActive &&
     state.stableTeamMaxPlayersSource.startsWith('mode:') &&
     state.stableTeamMaxPlayersSource !== source
   ) {
@@ -536,6 +545,15 @@ function applyBedWarsTeamModeFromText(
   state.stableTeamMaxPlayers = mode.maxPlayers
   state.stableTeamMaxPlayersSource = source
   return mode
+}
+
+function beginBedWarsPregameTransition(state: SplitReminderState, now: number) {
+  if (!state.bedWarsGameActive) return
+  if (state.bedWarsPregameSeenAt <= state.bedWarsGameStartedAt) {
+    state.stableTeamMaxPlayers = 0
+    state.stableTeamMaxPlayersSource = ''
+  }
+  state.bedWarsPregameSeenAt = now
 }
 
 function updateBedWarsGameStateFromText(
@@ -553,7 +571,8 @@ function updateBedWarsGameStateFromText(
   }
 
   if (event === 'pregame' && state.bedWarsGameActive) {
-    state.bedWarsPregameSeenAt = now
+    if (!isBedWarsPregameCountdown(text)) return null
+    beginBedWarsPregameTransition(state, now)
     return null
   }
 
@@ -1669,6 +1688,31 @@ function localPlayerNametagComponent(player: any, nicknames: Map<string, string>
     || { text: nickname }
 }
 
+function belowNameHealthComponent(player: any, state?: SessionState): any | null {
+  if (!state || typeof player?.name !== 'string') return null
+  const objectiveName = state.displayedScoreboardObjectives.get(2)
+  if (!objectiveName) return null
+
+  const score = state.scores.get(scoreKey(player.name, objectiveName))
+  const value = Number(score?.value)
+  if (!Number.isFinite(value)) return null
+
+  return {
+    text: '',
+    extra: [
+      { text: String(value), color: 'white' },
+      { text: ' \u2764', color: 'red' }
+    ]
+  }
+}
+
+function localPlayerNametagLines(player: any, nicknames: Map<string, string>, state?: SessionState): any[] | null {
+  const nameLine = localPlayerNametagComponent(player, nicknames, state)
+  if (!nameLine) return null
+  const healthLine = belowNameHealthComponent(player, state)
+  return healthLine ? [healthLine, nameLine] : [nameLine]
+}
+
 function localPlayerDisplayName(player: any, nicknames: Map<string, string>, state?: SessionState): string | null {
   const original = typeof player?.displayName === 'string' ? player.displayName : null
   const component = localPlayerDisplayComponent(player, nicknames, state)
@@ -1767,7 +1811,8 @@ function createSessionState(): SessionState {
     teams: new Map(),
     playerEntitiesByUuid: new Map(),
     playerEntityUuidById: new Map(),
-    scores: new Map()
+    scores: new Map(),
+    displayedScoreboardObjectives: new Map()
   }
 }
 
@@ -1971,6 +2016,23 @@ function scoreKey(itemName: unknown, scoreName: unknown): string {
   return `${String(scoreName)}\u0000${String(itemName).toLowerCase()}`
 }
 
+function trackScoreboardObjective(packet: any, state: SessionState) {
+  if (typeof packet?.name !== 'string' || Number(packet.action) !== 1) return
+  for (const [position, objectiveName] of state.displayedScoreboardObjectives) {
+    if (objectiveName === packet.name) state.displayedScoreboardObjectives.delete(position)
+  }
+}
+
+function trackScoreboardDisplayObjective(packet: any, state: SessionState) {
+  const position = Number(packet?.position)
+  if (!Number.isInteger(position)) return
+  if (typeof packet?.name !== 'string' || !packet.name) {
+    state.displayedScoreboardObjectives.delete(position)
+    return
+  }
+  state.displayedScoreboardObjectives.set(position, packet.name)
+}
+
 function trackScoreboardScore(packet: any, state: SessionState) {
   if (typeof packet?.itemName !== 'string' || typeof packet?.scoreName !== 'string') return
   const key = scoreKey(packet.itemName, packet.scoreName)
@@ -1996,14 +2058,18 @@ function scoreboardLinesForItem(itemName: string, state: SessionState): string[]
 
 function scoreboardModeTexts(state: SessionState): string[] {
   const lines: string[] = []
+  const sidebarObjective = state.displayedScoreboardObjectives.get(1)
 
   for (const score of state.scores.values()) {
     if (typeof score?.itemName !== 'string') continue
+    if (sidebarObjective && score?.scoreName !== sidebarObjective) continue
     lines.push(...scoreboardLinesForItem(score.itemName, state))
   }
 
-  for (const team of state.teams.values()) {
-    lines.push(`${team.team} ${team.prefix || ''} ${team.suffix || ''}`)
+  if (!sidebarObjective) {
+    for (const team of state.teams.values()) {
+      lines.push(`${team.team} ${team.prefix || ''} ${team.suffix || ''}`)
+    }
   }
 
   return Array.from(new Set(lines))
@@ -2011,16 +2077,35 @@ function scoreboardModeTexts(state: SessionState): string[] {
 
 function updateBedWarsModeFromScoreboard(
   state: SessionState,
-  splitState: SplitReminderState
+  splitState: SplitReminderState,
+  now = Date.now()
 ): { label: string; maxPlayers: number } | null {
-  let detected: { label: string; maxPlayers: number } | null = null
+  const texts = scoreboardModeTexts(state)
+  const countdownVisible = texts.some(isBedWarsPregameCountdown)
+  const countdownBecameVisible = countdownVisible && !splitState.bedWarsScoreboardCountdownVisible
+  splitState.bedWarsScoreboardCountdownVisible = countdownVisible
 
-  for (const text of scoreboardModeTexts(state)) {
-    const result = applyBedWarsTeamModeFromText(text, splitState)
-    if (result) detected = result
+  if (
+    splitState.bedWarsGameActive &&
+    countdownBecameVisible &&
+    now - splitState.bedWarsGameStartedAt >= BEDWARS_ROSTER_SETTLE_MS
+  ) {
+    beginBedWarsPregameTransition(splitState, now)
   }
 
-  return detected || applyBedWarsTeamModeFromScoreboardGroups(state, splitState)
+  if (splitState.stableTeamMaxPlayersSource.startsWith('mode:')) return null
+
+  let modeText: string | null = null
+  for (const text of texts) {
+    if (bedWarsTeamModeFromText(text)) modeText = text
+  }
+
+  const detected = modeText ? applyBedWarsTeamModeFromText(modeText, splitState) : null
+  const nextGamePregameActive =
+    splitState.bedWarsGameActive &&
+    splitState.bedWarsPregameSeenAt > splitState.bedWarsGameStartedAt
+
+  return detected || (nextGamePregameActive ? null : applyBedWarsTeamModeFromScoreboardGroups(state, splitState))
 }
 
 function logBedWarsModeIfChanged(splitState: SplitReminderState, mode: { label: string; maxPlayers: number } | null) {
@@ -2078,12 +2163,12 @@ function refreshApolloNametags(
 
   for (const player of state.playersByName.values()) {
     if (targetKey && playerKey(player?.name || '') !== targetKey) continue
-    const component = localPlayerNametagComponent(player, nicknames, state)
-    if (!component) {
+    const lines = localPlayerNametagLines(player, nicknames, state)
+    if (!lines) {
       if (targetKey) writeApolloJson(downstream, resetApolloNametagMessage(player.uuid))
       continue
     }
-    writeApolloJson(downstream, overrideApolloNametagMessage(player.uuid, component))
+    writeApolloJson(downstream, overrideApolloNametagMessage(player.uuid, lines))
   }
 }
 
@@ -2774,10 +2859,31 @@ function bridgePlay(
         return
       }
 
+      if (meta.name === 'scoreboard_objective') {
+        trackScoreboardObjective(data, sessionState)
+        downstream.write(meta.name, data)
+        if (apolloNickname.configured) {
+          refreshApolloNametags(downstream, sessionState, nicknames)
+        }
+        return
+      }
+
+      if (meta.name === 'scoreboard_display_objective') {
+        trackScoreboardDisplayObjective(data, sessionState)
+        downstream.write(meta.name, data)
+        if (apolloNickname.configured) {
+          refreshApolloNametags(downstream, sessionState, nicknames)
+        }
+        return
+      }
+
       if (meta.name === 'scoreboard_score') {
         trackScoreboardScore(data, sessionState)
         analyzeScoreboard()
         downstream.write(meta.name, withNicknameScoreboardScore(data, nicknames))
+        if (typeof (data as any)?.itemName === 'string') {
+          refreshApolloPlayers([(data as any).itemName])
+        }
         return
       }
 
@@ -2951,6 +3057,7 @@ export const __test = {
   lobbyWindowClickKey,
   legacyFormattedComponent,
   localPlayerNametagComponent,
+  localPlayerNametagLines,
   localPlayerTeam,
   localTeammateNames,
   nicknameListPage,
@@ -2967,6 +3074,8 @@ export const __test = {
   trackNamedEntitySpawn,
   trackPlayerInfo,
   trackScoreboardTeam,
+  trackScoreboardObjective,
+  trackScoreboardDisplayObjective,
   trackScoreboardScore,
   updateBedWarsModeFromScoreboard,
   withSplitReminderChatComponent,
