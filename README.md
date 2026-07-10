@@ -76,8 +76,9 @@ Minecraft client -> local proxy
 The app chooses the next hop for new sessions:
 
 ```text
-Direct:     local proxy -> mc.hypixel.net:25565
-StopTheLag: local proxy -> chi1.qtx.stopthelag.lol:25566 -> Hypixel
+Direct:       local proxy -> mc.hypixel.net:25565
+StopTheLag:   local proxy -> chi1.qtx.stopthelag.lol:25566 -> Hypixel
+Hypixel Fast: local proxy -> mc.hypixel.fast:25565 -> Hypixel
 ```
 
 Route changes are saved in `state/app-config.json`. If you change route while already connected, the active session keeps its current upstream and the next Minecraft connection uses the new route.
@@ -120,6 +121,8 @@ HYPIXEL_HOST=mc.hypixel.net
 HYPIXEL_PORT=25565
 STOPTHELAG_HOST=chi1.qtx.stopthelag.lol
 STOPTHELAG_PORT=25566
+HYPIXEL_FAST_HOST=mc.hypixel.fast
+HYPIXEL_FAST_PORT=25565
 DASHBOARD_HOST=127.0.0.1
 DASHBOARD_PORT=25765
 STATE_DIR=state

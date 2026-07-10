@@ -77,6 +77,13 @@ public sealed class MainForm : Form
         Address = "chi1.qtx.stopthelag.lol:25566",
         Description = "Minecraft proxy -> StopTheLag -> Hypixel"
     };
+    private readonly RouteCard hypixelFastRoute = new()
+    {
+        RouteId = "hypixelfast",
+        Title = "Hypixel Fast",
+        Address = "mc.hypixel.fast:25565",
+        Description = "Minecraft proxy -> Hypixel Fast -> Hypixel"
+    };
     private readonly ModernButton startButton = ModernButton.Primary("Start", Accent);
     private readonly ModernButton stopButton = ModernButton.Primary("Stop", Danger);
     private readonly ModernButton restartButton = ModernButton.Secondary("Restart");
@@ -307,15 +314,19 @@ public sealed class MainForm : Form
         header.Controls.Add(routingHint, 1, 0);
         layout.Controls.Add(header, 0, 0);
 
-        var routeGrid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Padding = new Padding(0, 6, 0, 8), BackColor = Surface };
-        routeGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        routeGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        directRoute.Margin = new Padding(0, 0, 8, 0);
-        stopTheLagRoute.Margin = new Padding(8, 0, 0, 0);
+        var routeGrid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, Padding = new Padding(0, 6, 0, 8), BackColor = Surface };
+        routeGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.333f));
+        routeGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.333f));
+        routeGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.334f));
+        directRoute.Margin = new Padding(0, 0, 7, 0);
+        stopTheLagRoute.Margin = new Padding(7, 0, 7, 0);
+        hypixelFastRoute.Margin = new Padding(7, 0, 0, 0);
         directRoute.Click += async (_, _) => await SetRouteAsync("direct");
         stopTheLagRoute.Click += async (_, _) => await SetRouteAsync("stopthelag");
+        hypixelFastRoute.Click += async (_, _) => await SetRouteAsync("hypixelfast");
         routeGrid.Controls.Add(directRoute, 0, 0);
         routeGrid.Controls.Add(stopTheLagRoute, 1, 0);
+        routeGrid.Controls.Add(hypixelFastRoute, 2, 0);
         layout.Controls.Add(routeGrid, 0, 1);
 
         var footer = new Label
@@ -699,6 +710,7 @@ public sealed class MainForm : Form
             restartButton.Enabled = !routeChanging;
             directRoute.Enabled = false;
             stopTheLagRoute.Enabled = false;
+            hypixelFastRoute.Enabled = false;
             splitToggle.Enabled = false;
             if (!routeChanging) logsView.LogText = "Proxy is not running.";
             authPanel.Visible = false;
@@ -713,11 +725,17 @@ public sealed class MainForm : Form
         restartButton.Enabled = !routeChanging;
         directRoute.Enabled = !routeChanging;
         stopTheLagRoute.Enabled = !routeChanging;
+        hypixelFastRoute.Enabled = !routeChanging;
         splitToggle.Enabled = !routeChanging;
 
         foreach (var route in status.Routes)
         {
-            var target = route.Id == "stopthelag" ? stopTheLagRoute : directRoute;
+            var target = route.Id switch
+            {
+                "stopthelag" => stopTheLagRoute,
+                "hypixelfast" => hypixelFastRoute,
+                _ => directRoute
+            };
             target.Title = route.Name ?? route.Id ?? "";
             target.Address = $"{route.Host}:{route.Port}";
             target.Description = route.Description ?? "";
@@ -881,6 +899,7 @@ public sealed class MainForm : Form
         routeChanging = true;
         directRoute.Selected = routeId == "direct";
         stopTheLagRoute.Selected = routeId == "stopthelag";
+        hypixelFastRoute.Selected = routeId == "hypixelfast";
         statusBadge.SetState("Restarting", true);
         routingHint.Text = "Restarting proxy...";
         startButton.Enabled = false;
@@ -888,6 +907,7 @@ public sealed class MainForm : Form
         restartButton.Enabled = false;
         directRoute.Enabled = false;
         stopTheLagRoute.Enabled = false;
+        hypixelFastRoute.Enabled = false;
         splitToggle.Enabled = false;
 
         try

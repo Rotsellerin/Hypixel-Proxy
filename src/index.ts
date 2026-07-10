@@ -103,7 +103,9 @@ const ROUTES = createRouteCatalog(
   process.env.HYPIXEL_HOST || 'mc.hypixel.net',
   Number(process.env.HYPIXEL_PORT || 25565),
   process.env.STOPTHELAG_HOST || 'chi1.qtx.stopthelag.lol',
-  Number(process.env.STOPTHELAG_PORT || 25566)
+  Number(process.env.STOPTHELAG_PORT || 25566),
+  process.env.HYPIXEL_FAST_HOST || 'mc.hypixel.fast',
+  Number(process.env.HYPIXEL_FAST_PORT || 25565)
 )
 let appConfig: AppConfig = loadAppConfig(STATE_DIR)
 const appLogs: AppLogEntry[] = []
@@ -2228,7 +2230,7 @@ function lobbyWindowClickKey(data: any): string {
 }
 
 function serverListDescription(route: UpstreamRoute): any {
-  const routeColor = route.id === 'stopthelag' ? 'aqua' : 'green'
+  const routeColor = serverListRouteColor(route)
   const ping = upstreamPingText(null)
   return {
     text: '',
@@ -2258,11 +2260,19 @@ function upstreamPingColor(latency: number | null): string {
 }
 
 function serverListRoutePadding(route: UpstreamRoute): string {
-  return route.id === 'direct' ? '                 ' : '            '
+  if (route.id === 'direct') return '                 '
+  if (route.id === 'hypixelfast') return '           '
+  return '            '
+}
+
+function serverListRouteColor(route: UpstreamRoute): string {
+  if (route.id === 'stopthelag') return 'aqua'
+  if (route.id === 'hypixelfast') return 'yellow'
+  return 'green'
 }
 
 function serverListDescriptionWithPing(route: UpstreamRoute, latency: number | null): any {
-  const routeColor = route.id === 'stopthelag' ? 'aqua' : 'green'
+  const routeColor = serverListRouteColor(route)
   return {
     text: '',
     extra: [

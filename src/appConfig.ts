@@ -1,7 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 
-export type RouteId = 'direct' | 'stopthelag'
+export type RouteId = 'direct' | 'stopthelag' | 'hypixelfast'
 
 export type UpstreamRoute = {
   id: RouteId
@@ -50,7 +50,9 @@ export function createRouteCatalog(
   directHost = 'mc.hypixel.net',
   directPort = 25565,
   stopTheLagHost = 'chi1.qtx.stopthelag.lol',
-  stopTheLagPort = 25566
+  stopTheLagPort = 25566,
+  hypixelFastHost = 'mc.hypixel.fast',
+  hypixelFastPort = 25565
 ): UpstreamRoute[] {
   return [
     {
@@ -66,6 +68,13 @@ export function createRouteCatalog(
       host: stopTheLagHost,
       port: stopTheLagPort,
       description: 'Minecraft proxy -> StopTheLag -> Hypixel'
+    },
+    {
+      id: 'hypixelfast',
+      name: 'Hypixel Fast',
+      host: hypixelFastHost,
+      port: hypixelFastPort,
+      description: 'Minecraft proxy -> Hypixel Fast -> Hypixel'
     }
   ]
 }
@@ -82,7 +91,8 @@ export function appConfigPath(stateDir: string): string {
 }
 
 export function normalizeRouteId(value: unknown): RouteId {
-  return value === 'stopthelag' ? 'stopthelag' : 'direct'
+  if (value === 'stopthelag' || value === 'hypixelfast') return value
+  return 'direct'
 }
 
 export function routeById(routeId: unknown, routes: UpstreamRoute[]): UpstreamRoute {
