@@ -2165,15 +2165,117 @@ function showMicrosoftCode(player: string, data: MsaCode) {
   console.log('')
 }
 
-function parseNicknameCommand(message: string): { player: string; nickname: string } | null {
-  const match = /^\s*\/nickname\s+([A-Za-z0-9_]{1,16})\s+(.+?)\s*$/.exec(message)
-  if (!match) return null
+type NicknameCommand =
+  | { action: 'add'; player: string; nickname: string }
+  | { action: 'remove'; player: string }
+  | { action: 'list'; page: number }
+  | { action: 'help' }
 
-  let nickname = match[2].trim()
-  const quoted = /^"([^"]+)"$/.exec(nickname)
-  if (quoted) nickname = quoted[1].trim()
+const NICKNAME_LIST_PAGE_SIZE = 8
 
-  return { player: match[1], nickname }
+function parseNicknameValue(value: string): string | null {
+  let nickname = value.trim()
+  if (!nickname) return null
+  if (nickname.startsWith('"') || nickname.endsWith('"')) {
+    const quoted = /^"([^"]+)"$/.exec(nickname)
+    if (!quoted) return null
+    nickname = quoted[1].trim()
+  }
+  return nickname || null
+}
+
+function parseNicknameCommand(message: string): NicknameCommand | null {
+  const directList = /^\s*\/(?:nicknames|nl)(?:\s+(\d+))?\s*$/i.exec(message)
+  if (directList) return { action: 'list', page: Math.max(1, Number(directList[1] || 1)) }
+
+  const directRemove = /^\s*\/nr\s+([A-Za-z0-9_]{1,16})\s*$/i.exec(message)
+  if (directRemove) return { action: 'remove', player: directRemove[1] }
+
+  const command = /^\s*\/(nickname|n)(?:\s+(.*?))?\s*$/i.exec(message)
+  if (!command) return null
+
+  const commandName = command[1].toLowerCase()
+  const args = (command[2] || '').trim()
+  const list = /^(?:list|l)(?:\s+(\d+))?$/i.exec(args)
+  if (list) return { action: 'list', page: Math.max(1, Number(list[1] || 1)) }
+
+  const remove = /^(?:remove|r|clear|delete)\s+([A-Za-z0-9_]{1,16})$/i.exec(args)
+  if (remove) return { action: 'remove', player: remove[1] }
+
+  const add = /^(?:add|a)\s+([A-Za-z0-9_]{1,16})\s+(.+)$/i.exec(args)
+  if (add) {
+    const nickname = parseNicknameValue(add[2])
+    return nickname
+      ? { action: 'add', player: add[1], nickname }
+      : { action: 'help' }
+  }
+
+  if (commandName === 'n') {
+    const directAdd = /^([A-Za-z0-9_]{1,16})\s+(.+)$/.exec(args)
+    if (directAdd && !/^(?:add|a|remove|r|clear|delete|list|l)$/i.test(directAdd[1])) {
+      const nickname = parseNicknameValue(directAdd[2])
+      if (nickname) return { action: 'add', player: directAdd[1], nickname }
+    }
+  }
+
+  return { action: 'help' }
+}
+
+function nicknameListPage(
+  nicknames: Map<string, string>,
+  requestedPage = 1
+): { page: number; totalPages: number; components: any[] } {
+  const rows = Array.from(nicknames.entries()).sort(([left], [right]) => left.localeCompare(right))
+  const totalPages = Math.max(1, Math.ceil(rows.length / NICKNAME_LIST_PAGE_SIZE))
+  const page = Math.min(totalPages, Math.max(1, Math.floor(requestedPage) || 1))
+  const pageRows = rows.slice((page - 1) * NICKNAME_LIST_PAGE_SIZE, page * NICKNAME_LIST_PAGE_SIZE)
+  const divider = { text: '----------------------------------------', color: 'dark_blue' }
+  const headerExtra: any[] = [
+    { text: '       Nicknames ', color: 'gold' },
+    { text: `(Page ${page} of ${totalPages})`, color: 'yellow' }
+  ]
+
+  if (page > 1) {
+    headerExtra.push({
+      text: ' <<',
+      color: 'yellow',
+      bold: true,
+      clickEvent: { action: 'run_command', value: `/n list ${page - 1}` },
+      hoverEvent: { action: 'show_text', value: { text: 'Previous page', color: 'yellow' } }
+    })
+  }
+  if (page < totalPages) {
+    headerExtra.push({
+      text: ' >>',
+      color: 'yellow',
+      bold: true,
+      clickEvent: { action: 'run_command', value: `/n list ${page + 1}` },
+      hoverEvent: { action: 'show_text', value: { text: 'Next page', color: 'yellow' } }
+    })
+  }
+
+  const components: any[] = [divider, { text: '', extra: headerExtra }]
+  if (!pageRows.length) {
+    components.push({ text: 'No nicknames saved.', color: 'red' })
+  } else {
+    for (const [player, nickname] of pageRows) {
+      components.push({
+        text: '',
+        extra: [
+          {
+            text: player,
+            color: 'aqua',
+            clickEvent: { action: 'suggest_command', value: `/nickname remove ${player}` },
+            hoverEvent: { action: 'show_text', value: { text: 'Click to prepare removal', color: 'red' } }
+          },
+          { text: ' is shown as ', color: 'gray' },
+          { text: nickname, color: 'green' }
+        ]
+      })
+    }
+  }
+  components.push(divider)
+  return { page, totalPages, components }
 }
 
 const LOBBY_COMMAND_ALIASES: Record<string, string> = {
@@ -2756,51 +2858,50 @@ function bridgePlay(
         return
       }
 
-      if (/^\s*\/nicknames\b/i.test(message)) {
-        const rows = Array.from(nicknames.entries()).sort()
-        if (!rows.length) {
-          sendClientChat(downstream, infoChat('Inga nicknames sparade.'))
-          return
-        }
-        sendClientChat(downstream, infoChat(rows.map(([player, nickname]) => `${player} = ${nickname}`).join(', ')))
+      const nicknameCommand = parseNicknameCommand(message)
+      if (nicknameCommand?.action === 'list') {
+        const list = nicknameListPage(nicknames, nicknameCommand.page)
+        for (const component of list.components) sendClientChat(downstream, component)
         return
       }
 
-      const clearMatch = /^\s*\/nickname\s+([A-Za-z0-9_]{1,16})\s+(?:clear|remove|delete)\s*$/i.exec(message)
-      if (clearMatch) {
-        const key = clearMatch[1].toLowerCase()
+      if (nicknameCommand?.action === 'remove') {
+        const key = nicknameCommand.player.toLowerCase()
         if (nicknames.delete(key)) {
           saveNicknames(nicknames)
-          refreshLocalNicknames(downstream, sessionState, nicknames, clearMatch[1])
+          refreshLocalNicknames(downstream, sessionState, nicknames, nicknameCommand.player)
           if (apolloNickname.configured) {
             refreshApolloNametags(downstream, sessionState, nicknames, undefined, true)
           }
-          sendClientChat(downstream, okChat(`Tog bort nickname for ${clearMatch[1]}.`))
+          sendClientChat(downstream, okChat(`Tog bort nickname for ${nicknameCommand.player}.`))
         } else {
-          sendClientChat(downstream, infoChat(`${clearMatch[1]} hade ingen nickname.`))
+          sendClientChat(downstream, infoChat(`${nicknameCommand.player} hade ingen nickname.`))
         }
         return
       }
 
-      const nickname = parseNicknameCommand(message)
-      if (nickname) {
-        if (!nickname.nickname || nickname.nickname.length > 32) {
-          sendClientChat(downstream, errChat('Usage: /nickname <player> "nickname" (max 32 tecken)'))
+      if (nicknameCommand?.action === 'add') {
+        const cleanedNickname = stripColors(nicknameCommand.nickname).trim()
+        if (!cleanedNickname || cleanedNickname.length > 32) {
+          sendClientChat(downstream, errChat('Usage: /nickname add <player> <nickname> (max 32 tecken)'))
           return
         }
 
-        nicknames.set(nickname.player.toLowerCase(), stripColors(nickname.nickname))
+        nicknames.set(nicknameCommand.player.toLowerCase(), cleanedNickname)
         saveNicknames(nicknames)
-        refreshLocalNicknames(downstream, sessionState, nicknames, nickname.player)
+        refreshLocalNicknames(downstream, sessionState, nicknames, nicknameCommand.player)
         if (apolloNickname.configured) {
-          refreshApolloNametags(downstream, sessionState, nicknames, nickname.player)
+          refreshApolloNametags(downstream, sessionState, nicknames, nicknameCommand.player)
         }
-        sendClientChat(downstream, okChat(`${nickname.player} visas lokalt som ${nickname.nickname}.`))
+        sendClientChat(downstream, okChat(`${nicknameCommand.player} visas lokalt som ${cleanedNickname}.`))
         return
       }
 
-      if (/^\s*\/nickname\b/i.test(message)) {
-        sendClientChat(downstream, infoChat('Usage: /nickname <player> "nickname"'))
+      if (nicknameCommand?.action === 'help') {
+        sendClientChat(downstream, infoChat('Usage: /nickname <add|remove|list> [player] [nickname]'))
+        sendClientChat(downstream, infoChat('Short add: /n <player> <nickname>'))
+        sendClientChat(downstream, infoChat('Short remove/list: /nr <player> | /nl [page]'))
+        sendClientChat(downstream, infoChat('Also supported: /n <a|r|l> ...'))
         return
       }
 
@@ -2852,6 +2953,8 @@ export const __test = {
   localPlayerNametagComponent,
   localPlayerTeam,
   localTeammateNames,
+  nicknameListPage,
+  parseNicknameCommand,
   playerInfoMayChangeBedWarsRoster,
   shouldExtendTransferWatchFromChunk,
   refreshApolloNametags,

@@ -94,9 +94,13 @@ Each person should sign in with their own account. Do not share `state/auth-cach
 These commands are local. They are not sent to Hypixel.
 
 ```text
-/nickname <player> "custom nickname"
-/nickname <player> clear
-/nicknames
+/nickname add <player> <nickname>
+/nickname remove <player>
+/nickname list [page]
+/n <add|remove|list> ...
+/n <player> <nickname>
+/nr <player>
+/nl [page]
 ```
 
 Nicknames are saved in `state/nicknames.json`.

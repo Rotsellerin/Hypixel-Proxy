@@ -3,6 +3,56 @@ const { __test } = require('../dist/index')
 
 const nicknames = new Map([['998r', 'Bollen']])
 
+assert.deepEqual(__test.parseNicknameCommand('/nickname add 998r "Bollen Boy"'), {
+  action: 'add',
+  player: '998r',
+  nickname: 'Bollen Boy'
+})
+assert.deepEqual(__test.parseNicknameCommand('/n a 998r Bollen'), {
+  action: 'add',
+  player: '998r',
+  nickname: 'Bollen'
+})
+assert.deepEqual(__test.parseNicknameCommand('/n add 998r Bollen'), {
+  action: 'add',
+  player: '998r',
+  nickname: 'Bollen'
+})
+assert.deepEqual(__test.parseNicknameCommand('/n 998r "Bollen Boy"'), {
+  action: 'add',
+  player: '998r',
+  nickname: 'Bollen Boy'
+})
+assert.deepEqual(__test.parseNicknameCommand('/nickname remove 998r'), { action: 'remove', player: '998r' })
+assert.deepEqual(__test.parseNicknameCommand('/n remove 998r'), { action: 'remove', player: '998r' })
+assert.deepEqual(__test.parseNicknameCommand('/n r 998r'), { action: 'remove', player: '998r' })
+assert.deepEqual(__test.parseNicknameCommand('/nr 998r'), { action: 'remove', player: '998r' })
+assert.deepEqual(__test.parseNicknameCommand('/nickname list 2'), { action: 'list', page: 2 })
+assert.deepEqual(__test.parseNicknameCommand('/n list'), { action: 'list', page: 1 })
+assert.deepEqual(__test.parseNicknameCommand('/n l'), { action: 'list', page: 1 })
+assert.deepEqual(__test.parseNicknameCommand('/nl'), { action: 'list', page: 1 })
+assert.deepEqual(__test.parseNicknameCommand('/nl 2'), { action: 'list', page: 2 })
+assert.deepEqual(__test.parseNicknameCommand('/nicknames'), { action: 'list', page: 1 })
+assert.deepEqual(__test.parseNicknameCommand('/nickname nope'), { action: 'help' })
+assert.deepEqual(__test.parseNicknameCommand('/nickname add 998r ""'), { action: 'help' })
+assert.deepEqual(__test.parseNicknameCommand('/n list nope'), { action: 'help' })
+assert.equal(__test.parseNicknameCommand('/msg 998r hello'), null)
+
+const listNicknames = new Map(Array.from({ length: 9 }, (_, index) => [`player${index}`, `nickname${index}`]))
+const firstListPage = __test.nicknameListPage(listNicknames, 1)
+assert.equal(firstListPage.page, 1)
+assert.equal(firstListPage.totalPages, 2)
+assert.equal(firstListPage.components.length, 11)
+assert.match(JSON.stringify(firstListPage.components), /Page 1 of 2/)
+assert.ok(JSON.stringify(firstListPage.components).includes('/n list 2'))
+assert.match(JSON.stringify(firstListPage.components), /nickname0/)
+assert.doesNotMatch(JSON.stringify(firstListPage.components), /nickname8/)
+
+const secondListPage = __test.nicknameListPage(listNicknames, 2)
+assert.equal(secondListPage.page, 2)
+assert.match(JSON.stringify(secondListPage.components), /nickname8/)
+assert.ok(JSON.stringify(secondListPage.components).includes('/n list 1'))
+
 const playerInfo = {
   action: 'add_player',
   data: [{
