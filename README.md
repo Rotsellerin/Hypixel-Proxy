@@ -111,6 +111,8 @@ Nicknames are display-only aliases. The proxy keeps each player's real profile n
 
 The local split reminder watches incoming chat for your respawn window and teammate death messages. If a teammate dies while you are waiting to respawn, the Windows app plays the embedded Minecraft pling notification and the next `RESPAWNED!` title is shown locally as `SPLIT!`. The app audio is independent of Minecraft's Jukebox/Note Blocks volume. Its volume slider and `Test sound` button are available in the QoL drawer, and the selected volume is saved in `state/launcher-settings.json`.
 
+When you use Hypixel `/nick`, the proxy automatically links the temporary Hypixel name to your local account. It first uses the player UUID when available and can also learn the name from Hypixel's nick status or your next public chat message. Team detection and self-death filtering then use the temporary name for the rest of the session.
+
 Use `/splitsound` in Minecraft to test the sound without sending the command to Hypixel. The app can turn the reminder on/off, and advanced pattern settings are saved in `state/app-config.json`.
 
 ## Config

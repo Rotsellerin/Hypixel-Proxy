@@ -11,6 +11,8 @@ type NicknameFile = { nicknames: Record<string, string> }
 type SessionState = {
   playersByName: Map<string, any>
   playerNameByUuid: Map<string, string>
+  localPlayerUuid: string
+  localPlayerAliasesByKey: Map<string, string>
   teams: Map<string, TeamState>
   playerEntitiesByUuid: Map<string, PlayerEntityState>
   playerEntityUuidById: Map<number, string>
@@ -618,6 +620,26 @@ function teamHasPlayer(team: TeamState, playerName: string): boolean {
   return false
 }
 
+function localPlayerIdentityNames(state: SessionState, localPlayerName: string): string[] {
+  const names = new Map(state.localPlayerAliasesByKey)
+  const clean = stripColors(localPlayerName).trim()
+  if (validPlayerName(clean)) names.set(playerKey(clean), clean)
+  return Array.from(names.values())
+}
+
+function localPlayerRosterName(state: SessionState, team: TeamState, localPlayerName: string): string {
+  for (const identityName of localPlayerIdentityNames(state, localPlayerName)) {
+    for (const player of team.players) {
+      if (playerKey(player) === playerKey(identityName)) return stripColors(player).trim()
+    }
+  }
+  return stripColors(localPlayerName).trim()
+}
+
+function teamHasLocalPlayer(state: SessionState, team: TeamState, localPlayerName: string): boolean {
+  return localPlayerIdentityNames(state, localPlayerName).some(identityName => teamHasPlayer(team, identityName))
+}
+
 function addLocalTeamPlayer(playersByKey: Map<string, string>, playerName: string) {
   const clean = stripColors(playerName).trim()
   if (!validPlayerName(clean)) return
@@ -688,7 +710,9 @@ function retainLocalBedWarsTabTeams(state?: SessionState, localPlayerName?: stri
     return
   }
 
-  const localPlayer = state.playersByName.get(playerKey(localPlayerName))
+  const localPlayer = localPlayerIdentityNames(state, localPlayerName)
+    .map(name => state.playersByName.get(playerKey(name)))
+    .find(player => !!player)
   const localLetter = localPlayerTeamCandidates(state, localPlayerName)
     .map(bedWarsTabTeamLetter)
     .find((letter): letter is string => !!letter)
@@ -704,14 +728,14 @@ function retainLocalBedWarsTabTeams(state?: SessionState, localPlayerName?: stri
     const playerLetterMatches = Array.from(team.players).some(player => {
       return bedWarsTabTeamLetterFromPlayerInfo(state.playersByName.get(playerKey(player))) === localLetter
     })
-    if (teamLetter !== localLetter && !playerLetterMatches && !teamHasPlayer(team, localPlayerName)) {
+    if (teamLetter !== localLetter && !playerLetterMatches && !teamHasLocalPlayer(state, team, localPlayerName)) {
       state.teams.delete(teamName)
     }
   }
 }
 
 function localPlayerTeamCandidates(state: SessionState, localPlayerName: string): TeamState[] {
-  const teams = Array.from(state.teams.values()).filter(team => teamHasPlayer(team, localPlayerName))
+  const teams = Array.from(state.teams.values()).filter(team => teamHasLocalPlayer(state, team, localPlayerName))
   if (!teams.length) return []
 
   teams.sort((a, b) => {
@@ -829,11 +853,12 @@ function localPlayerTeamSnapshotForCandidate(
   localPlayerName: string,
   primaryTeam: TeamState
 ): LocalTeamSnapshot {
+  const rosterName = localPlayerRosterName(state, primaryTeam, localPlayerName)
   const tabLetter = bedWarsTabTeamLetter(primaryTeam)
-    || bedWarsTabTeamLetterFromPlayerInfo(state.playersByName.get(playerKey(localPlayerName)))
+    || bedWarsTabTeamLetterFromPlayerInfo(state.playersByName.get(playerKey(rosterName)))
   const colorName = (tabLetter ? BEDWARS_TAB_TEAM_LETTERS[tabLetter] || null : null)
     || teamColorName(primaryTeam)
-    || playerStateColorName(state, localPlayerName)
+    || playerStateColorName(state, rosterName)
   const teams = tabLetter
     ? Array.from(state.teams.values()).filter(team => bedWarsTabTeamLetter(team) === tabLetter)
     : colorName
@@ -849,7 +874,7 @@ function localPlayerTeamSnapshotForCandidate(
     }
   }
 
-  addLocalTeamPlayer(playersByKey, localPlayerName)
+  addLocalTeamPlayer(playersByKey, rosterName)
 
   return {
     primaryTeam,
@@ -1048,12 +1073,13 @@ function withStableLocalTeamSnapshot(
   if (!splitState.stableTeamColorName) splitState.stableTeamColorName = teamKey
 
   maybeSettleTeamMaxPlayers(splitState, state, snapshot, now)
-  addStableTeamPlayer(splitState, localPlayerName, true)
+  const rosterName = localPlayerRosterName(state, snapshot.primaryTeam, localPlayerName)
+  addStableTeamPlayer(splitState, rosterName, true)
 
   for (const player of snapshot.playersByKey.values()) {
     addStableTeamPlayer(splitState, player)
   }
-  trimStableTeamPlayers(splitState, localPlayerName)
+  trimStableTeamPlayers(splitState, rosterName)
 
   return {
     ...snapshot,
@@ -1132,6 +1158,11 @@ function isLocalPlayerDeathText(text: string, settings: SplitReminderSettings, l
   return !!player && playerKey(player) === playerKey(localPlayerName)
 }
 
+function isLocalPlayerIdentity(state: SessionState | undefined, localPlayerName: string, playerName: string): boolean {
+  if (playerKey(playerName) === playerKey(localPlayerName)) return true
+  return !!state?.localPlayerAliasesByKey.has(playerKey(playerName))
+}
+
 function isLocalTeammateDeathText(
   text: string,
   settings: SplitReminderSettings,
@@ -1144,7 +1175,7 @@ function isLocalTeammateDeathText(
 
   const player = deathPlayerName(text)
   if (!player) return { match: false, reason: 'unknown_player' }
-  if (localPlayerName && playerKey(player) === playerKey(localPlayerName)) {
+  if (localPlayerName && isLocalPlayerIdentity(sessionState, localPlayerName, player)) {
     return { match: false, player, reason: 'self' }
   }
   if (!sessionState || !localPlayerName) {
@@ -1804,10 +1835,15 @@ function withNicknameNamedEntitySpawn(packet: any, nicknames: Map<string, string
   return withNicknameEntityMetadata(packet, nicknames)
 }
 
-function createSessionState(): SessionState {
+function createSessionState(localPlayerName = '', localPlayerUuid = ''): SessionState {
+  const aliases = new Map<string, string>()
+  const cleanLocalPlayerName = stripColors(localPlayerName).trim()
+  if (validPlayerName(cleanLocalPlayerName)) aliases.set(playerKey(cleanLocalPlayerName), cleanLocalPlayerName)
   return {
     playersByName: new Map(),
     playerNameByUuid: new Map(),
+    localPlayerUuid: uuidKey(localPlayerUuid),
+    localPlayerAliasesByKey: aliases,
     teams: new Map(),
     playerEntitiesByUuid: new Map(),
     playerEntityUuidById: new Map(),
@@ -1817,7 +1853,7 @@ function createSessionState(): SessionState {
 }
 
 function uuidKey(uuid: unknown): string {
-  return String(uuid)
+  return String(uuid || '').replace(/-/g, '').toLowerCase()
 }
 
 function clonePacketData(data: any): any {
@@ -1846,6 +1882,9 @@ function trackPlayerInfo(packet: any, state: SessionState) {
       const key = player.name.toLowerCase()
       state.playersByName.set(key, clonePacketData(player))
       state.playerNameByUuid.set(uuidKey(player.uuid), key)
+      if (state.localPlayerUuid && uuidKey(player.uuid) === state.localPlayerUuid) {
+        state.localPlayerAliasesByKey.set(playerKey(player.name), player.name)
+      }
     }
     return
   }
@@ -1868,6 +1907,42 @@ function trackPlayerInfo(packet: any, state: SessionState) {
     if ('ping' in player) cached.ping = player.ping
     if ('displayName' in player) cached.displayName = player.displayName
   }
+}
+
+function registerLocalPlayerAlias(state: SessionState, playerName: string): boolean {
+  const clean = stripColors(playerName).trim()
+  const key = playerKey(clean)
+  if (!validPlayerName(clean) || !state.playersByName.has(key)) return false
+  if (state.localPlayerAliasesByKey.has(key)) return false
+  state.localPlayerAliasesByKey.set(key, clean)
+  return true
+}
+
+function localPlayerAliasFromNickStatus(text: string, state: SessionState): string | null {
+  const clean = stripColors(text).replace(/\s+/g, ' ').trim()
+  const match = /\b(?:currently|now)?\s*nicked\s+as\s+([A-Za-z0-9_]{1,16})\b/i.exec(clean)
+  if (!match) return null
+  const key = playerKey(match[1])
+  return state.playersByName.get(key)?.name || null
+}
+
+function localPlayerAliasFromChatEcho(text: string, sentMessage: string, state: SessionState): string | null {
+  const message = stripColors(sentMessage).trim()
+  if (!message || message.startsWith('/')) return null
+
+  const clean = stripColors(text)
+  const messageAt = clean.lastIndexOf(message)
+  if (messageAt < 0) return null
+  const header = clean.slice(0, messageAt)
+  const matches: string[] = []
+
+  for (const player of state.playersByName.values()) {
+    if (typeof player?.name !== 'string' || !validPlayerName(player.name)) continue
+    const pattern = new RegExp(`(?:^|[^A-Za-z0-9_])${escapeRegExp(player.name)}(?:$|[^A-Za-z0-9_])`, 'i')
+    if (pattern.test(header)) matches.push(player.name)
+  }
+
+  return matches.length === 1 ? matches[0] : null
 }
 
 function teamPlayers(packet: any): string[] {
@@ -2597,6 +2672,7 @@ function bridgePlay(
   let lastLobbyWindowClickAt = 0
   let lastScoreboardAnalysisAt = 0
   let scoreboardAnalysisDeferred = false
+  let recentLocalChat: { message: string; sentAt: number } | null = null
   const transferWatch: TransferWatchState = {
     active: false,
     expiresAt: 0
@@ -2721,6 +2797,19 @@ function bridgePlay(
           }
         })()
         const now = Date.now()
+        const detectedLocalAlias = localPlayerAliasFromNickStatus(flattenChatToText(comp), sessionState)
+          || (
+            recentLocalChat && now - recentLocalChat.sentAt <= 5000
+              ? localPlayerAliasFromChatEcho(flattenChatToText(comp), recentLocalChat.message, sessionState)
+              : null
+          )
+        if (detectedLocalAlias && registerLocalPlayerAlias(sessionState, detectedLocalAlias)) {
+          term('QoL', `Local Hypixel nick detected: ${downstream.username} -> ${detectedLocalAlias}.`, colors.yellow)
+          analyzeScoreboard(true)
+        }
+        if (recentLocalChat && flattenChatToText(comp).includes(recentLocalChat.message)) {
+          recentLocalChat = null
+        }
         const gameStartedAtBeforeChat = splitReminderState.bedWarsGameStartedAt
         const pendingBeforeChat = splitReminderState.splitPending
         const splitSignalBeforeChat = splitReminderState.splitSignalId
@@ -2957,6 +3046,9 @@ function bridgePlay(
 
     if (meta.name === 'chat') {
       const message = String((data as any).message || '')
+      if (message.trim() && !message.trim().startsWith('/')) {
+        recentLocalChat = { message, sentAt: Date.now() }
+      }
 
       if (/^\s*\/splitsound\s*$/i.test(message)) {
         splitSoundEventId += 1
@@ -3053,6 +3145,8 @@ export const __test = {
   deathPlayerName,
   isLocalTeammateDeathText,
   isLobbySelectorWindowTitle,
+  localPlayerAliasFromChatEcho,
+  localPlayerAliasFromNickStatus,
   lobbyCommandKey,
   lobbyWindowClickKey,
   legacyFormattedComponent,
@@ -3068,6 +3162,7 @@ export const __test = {
   refreshNicknameTabPlayers,
   refreshLocalNicknames,
   replaceNamesInChat,
+  registerLocalPlayerAlias,
   serverListDescription,
   serverListPlayers,
   serverListStatusResponse,
@@ -3174,7 +3269,7 @@ export function startProxy(): Server {
     term('Routing', `${downstream.username} -> ${route.name} (${route.host}:${route.port})`, colors.cyan)
 
     const nicknames = loadNicknames()
-    const sessionState = createSessionState()
+    const sessionState = createSessionState(downstream.username, downstream.uuid)
     const splitReminderState = createSplitReminderState()
     let microsoftCodeShown = false
     const upstream: Client = mc.createClient({

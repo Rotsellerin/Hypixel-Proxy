@@ -14,6 +14,67 @@ assert.equal(__test.playerInfoMayChangeBedWarsRoster({ action: 4 }), true)
 assert.equal(__test.playerInfoMayChangeBedWarsRoster({ action: 'update_latency' }), false)
 assert.equal(__test.playerInfoMayChangeBedWarsRoster({ action: 2 }), false)
 
+const realUuid = '12345678-1234-1234-1234-123456789abc'
+const hypixelNick = 'RandomNickedIGN'
+const nickIdentitySession = __test.createSessionState(localPlayer, realUuid)
+const nickIdentityState = __test.createSplitReminderState()
+nickIdentityState.bedWarsGameActive = true
+nickIdentityState.bedWarsGameStartedAt = 1
+__test.trackPlayerInfo({
+  action: 'add_player',
+  data: [
+    { uuid: realUuid.replace(/-/g, ''), name: hypixelNick, displayName: JSON.stringify({ text: `R ${hypixelNick}` }) },
+    { uuid: '00000000000000000000000000000002', name: 'NickTeamMate', displayName: JSON.stringify({ text: 'R NickTeamMate' }) }
+  ]
+}, nickIdentitySession)
+__test.trackScoreboardTeam('scoreboard_team', {
+  team: 'red-nicked',
+  mode: 0,
+  prefix: 'R ',
+  players: [hypixelNick, 'NickTeamMate']
+}, nickIdentitySession, new Map())
+assert.deepEqual(
+  __test.localTeammateNames(nickIdentitySession, localPlayer, nickIdentityState, 5000),
+  ['NickTeamMate', hypixelNick]
+)
+assert.equal(__test.isLocalTeammateDeathText(
+  `${hypixelNick} fell into the void.`,
+  settings,
+  nickIdentitySession,
+  localPlayer,
+  nickIdentityState,
+  5000
+).reason, 'self')
+
+const chatAliasSession = __test.createSessionState(localPlayer, realUuid)
+__test.trackPlayerInfo({
+  action: 'add_player',
+  data: [{ uuid: 'ffffffffffffffffffffffffffffffff', name: hypixelNick }]
+}, chatAliasSession)
+assert.equal(
+  __test.localPlayerAliasFromChatEcho(`[MVP+] ${hypixelNick}: testing my nick`, 'testing my nick', chatAliasSession),
+  hypixelNick
+)
+assert.equal(__test.registerLocalPlayerAlias(chatAliasSession, hypixelNick), true)
+assert.equal(__test.registerLocalPlayerAlias(chatAliasSession, hypixelNick), false)
+__test.trackScoreboardTeam('scoreboard_team', {
+  team: 'blue-nicked',
+  mode: 0,
+  prefix: 'B ',
+  players: [hypixelNick, 'ChatTeamMate']
+}, chatAliasSession, new Map())
+const chatAliasState = __test.createSplitReminderState()
+chatAliasState.bedWarsGameActive = true
+chatAliasState.bedWarsGameStartedAt = 1
+assert.deepEqual(
+  __test.localTeammateNames(chatAliasSession, localPlayer, chatAliasState, 5000),
+  ['ChatTeamMate', hypixelNick]
+)
+assert.equal(
+  __test.localPlayerAliasFromNickStatus(`You are currently nicked as ${hypixelNick}!`, chatAliasSession),
+  hypixelNick
+)
+
 const activeGameForChunkWatch = __test.createSplitReminderState()
 activeGameForChunkWatch.bedWarsGameActive = true
 assert.equal(__test.shouldExtendTransferWatchFromChunk(activeGameForChunkWatch, { active: false, expiresAt: 0 }), false)
