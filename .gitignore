@@ -1,6 +1,6 @@
 node_modules/
 dist/
-state/
+/state/
 .env
 .dotnet/
 .dotnet-install.ps1
@@ -8,6 +8,7 @@ launcher/**/bin/
 launcher/**/obj/
 app/*.pdb
 qa-screenshots/
+private/
 *.csproj.user
 
 npm-debug.log*

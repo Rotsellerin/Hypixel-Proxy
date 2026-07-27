@@ -28,10 +28,16 @@ const normalized = normalizeAppConfig({
   }
 })
 assert.equal(normalized.routeId, 'stopthelag')
+assert.equal(normalized.bedWars.respawnTimerEnabled, true)
 assert.equal(normalized.splitReminder.enabled, false)
 assert.equal(normalized.splitReminder.respawnedText, 'RESPAWNED')
 assert.equal(normalized.splitReminder.replacementText, 'SPLIT NOW')
 assert.equal(normalizeAppConfig({ routeId: 'hypixelfast' }).routeId, 'hypixelfast')
+assert.equal(normalizeAppConfig({
+  bedWars: {
+    respawnTimerEnabled: false
+  }
+}).bedWars.respawnTimerEnabled, false)
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hypixel-proxy-'))
 try {

@@ -6,34 +6,40 @@ import { AppConfig, RouteId, SplitReminderSettings, UpstreamRoute, createRouteCa
 import { apolloChannelRegistrationPacket, apolloJsonPacket, enableApolloNametagMessage, overrideApolloNametagMessage, packetSignalsLunarClient, packetUnregistersApollo, resetAllApolloNametagsMessage, resetApolloNametagMessage } from './apollo'
 import { startDashboard } from './dashboard'
 import { MsaCode, microsoftAuthPrompt } from './microsoftAuthPrompt'
+import {
+  SessionState,
+  TeamState,
+  createSessionState,
+  scoreKey,
+  teamPlayers,
+  trackEntityDestroy,
+  trackEntityEquipment,
+  trackEntityMetadata,
+  trackEntityMovement,
+  trackNamedEntitySpawn,
+  trackLocalGameMode,
+  trackPlayerInfo,
+  trackScoreboardDisplayObjective,
+  trackScoreboardObjective,
+  trackScoreboardScore,
+  trackScoreboardTeam,
+  uuidKey
+} from './state/sessionState'
+import {
+  SplitReminderState,
+  createSplitReminderState,
+  resetSplitReminderMatchState
+} from './state/splitReminderState'
+import {
+  BEDWARS_RECONNECT_RESPAWN_MS,
+  clearRespawnTimers,
+  collectRespawnTimerUpdates,
+  createRespawnTimerState,
+  respawnTimerSeconds,
+  startRespawnTimer
+} from './state/respawnTimerState'
 
 type NicknameFile = { nicknames: Record<string, string> }
-type SessionState = {
-  playersByName: Map<string, any>
-  playerNameByUuid: Map<string, string>
-  localPlayerUuid: string
-  localPlayerAliasesByKey: Map<string, string>
-  teams: Map<string, TeamState>
-  playerEntitiesByUuid: Map<string, PlayerEntityState>
-  playerEntityUuidById: Map<number, string>
-  scores: Map<string, any>
-  displayedScoreboardObjectives: Map<number, string>
-}
-type TeamState = {
-  team: string
-  packetName: string
-  prefix: string
-  suffix: string
-  players: Set<string>
-  sentPlayers: Set<string>
-}
-type PlayerEntityState = {
-  entityId: number
-  uuid: string
-  spawnPacket: any
-  metadata: any[]
-  equipment: Map<number, any>
-}
 type AppLogEntry = {
   time: string
   label: string
@@ -42,24 +48,6 @@ type AppLogEntry = {
   url?: string
   code?: string
   player?: string
-}
-type SplitReminderState = {
-  respawning: boolean
-  splitPending: boolean
-  splitSignalId: number
-  lastTrigger: string
-  preRespawnTrigger: string
-  preRespawnTriggerAt: number
-  lastTeamSignature: string
-  stableTeamColorName: string
-  stableTeamPlayersByKey: Map<string, string>
-  stableTeamMaxPlayers: number
-  stableTeamMaxPlayersSource: string
-  lastModeLogSignature: string
-  bedWarsGameStartedAt: number
-  bedWarsPregameSeenAt: number
-  bedWarsScoreboardCountdownVisible: boolean
-  bedWarsGameActive: boolean
 }
 type SplitReminderContext = {
   sessionState?: SessionState
@@ -88,6 +76,17 @@ type UpstreamStatusSnapshot = {
   checkedAt: number
   latency: number | null
   pong: any | null
+}
+type SettingCommand =
+  | { action: 'list' }
+  | { action: 'change'; path: string; value: boolean | null }
+  | { action: 'help' }
+type LocalSettingChange = {
+  config: AppConfig
+  path: string
+  displayName: string
+  oldValue: boolean
+  newValue: boolean
 }
 
 loadDotEnv(path.join(process.cwd(), '.env'))
@@ -137,6 +136,40 @@ const BEDWARS_TAB_TEAM_LETTERS: Record<string, string> = {
   W: 'White',
   P: 'Pink',
   S: 'Gray'
+}
+const BEDWARS_CHAT_TEAM_FORMAT: Record<string, { colorName: string; code: string; letter: string }> = {
+  red: { colorName: 'Red', code: 'c', letter: 'R' },
+  dark_red: { colorName: 'Red', code: 'c', letter: 'R' },
+  blue: { colorName: 'Blue', code: '9', letter: 'B' },
+  dark_blue: { colorName: 'Blue', code: '9', letter: 'B' },
+  green: { colorName: 'Green', code: 'a', letter: 'G' },
+  dark_green: { colorName: 'Green', code: 'a', letter: 'G' },
+  yellow: { colorName: 'Yellow', code: 'e', letter: 'Y' },
+  gold: { colorName: 'Yellow', code: 'e', letter: 'Y' },
+  aqua: { colorName: 'Aqua', code: 'b', letter: 'A' },
+  dark_aqua: { colorName: 'Aqua', code: 'b', letter: 'A' },
+  white: { colorName: 'White', code: 'f', letter: 'W' },
+  light_purple: { colorName: 'Pink', code: 'd', letter: 'P' },
+  dark_purple: { colorName: 'Pink', code: 'd', letter: 'P' },
+  gray: { colorName: 'Gray', code: '7', letter: 'S' },
+  dark_gray: { colorName: 'Gray', code: '7', letter: 'S' }
+}
+const BEDWARS_LEGACY_CHAT_TEAM_FORMAT: Record<string, string> = {
+  c: 'red',
+  '4': 'dark_red',
+  '9': 'blue',
+  '1': 'dark_blue',
+  a: 'green',
+  '2': 'dark_green',
+  e: 'yellow',
+  '6': 'gold',
+  b: 'aqua',
+  '3': 'dark_aqua',
+  f: 'white',
+  d: 'light_purple',
+  '5': 'dark_purple',
+  '7': 'gray',
+  '8': 'dark_gray'
 }
 const LOBBY_COMMAND_DEDUPE_MS = 2500
 const RAW_FORWARD_UPSTREAM_PACKETS = new Set(['map_chunk', 'map_chunk_bulk'])
@@ -254,6 +287,97 @@ function setSplitReminderEnabled(enabled: boolean) {
   return dashboardStatus()
 }
 
+const LOCAL_SETTING_DEFINITIONS = [
+  {
+    path: 'bedwars.tablist.show_respawn_timer',
+    aliases: ['respawn_timer', 'respawn-timer'],
+    displayName: 'Show Respawn Timer'
+  },
+  {
+    path: 'qol.split_reminder',
+    aliases: ['split_reminder', 'split-reminder', 'split'],
+    displayName: 'SPLIT Reminder'
+  }
+] as const
+
+function parseSettingCommand(message: string): SettingCommand | null {
+  const match = /^\s*\/setting(?:\s+(.*?))?\s*$/i.exec(message)
+  if (!match) return null
+
+  const args = (match[1] || '').trim()
+  if (!args || /^(?:list|ls)$/i.test(args)) return { action: 'list' }
+  if (/^(?:help|\?)$/i.test(args)) return { action: 'help' }
+
+  const parts = args.split(/\s+/)
+  if (parts.length > 2) return { action: 'help' }
+  if (parts.length === 1) return { action: 'change', path: parts[0], value: null }
+
+  const value = parts[1].toLowerCase()
+  if (['on', 'enabled', 'enable', 'true'].includes(value)) {
+    return { action: 'change', path: parts[0], value: true }
+  }
+  if (['off', 'disabled', 'disable', 'false'].includes(value)) {
+    return { action: 'change', path: parts[0], value: false }
+  }
+  return { action: 'help' }
+}
+
+function canonicalSettingPath(pathValue: string): string | null {
+  const pathKey = pathValue.trim().toLowerCase()
+  const definition = LOCAL_SETTING_DEFINITIONS.find(setting => (
+    setting.path === pathKey || setting.aliases.some(alias => alias === pathKey)
+  ))
+  return definition?.path || null
+}
+
+function localSettingValue(config: AppConfig, pathValue: string): boolean | null {
+  const settingPath = canonicalSettingPath(pathValue)
+  if (settingPath === 'bedwars.tablist.show_respawn_timer') {
+    return config.bedWars.respawnTimerEnabled
+  }
+  if (settingPath === 'qol.split_reminder') {
+    return config.splitReminder.enabled
+  }
+  return null
+}
+
+function changeLocalSetting(
+  config: AppConfig,
+  pathValue: string,
+  requestedValue: boolean | null
+): LocalSettingChange | null {
+  const settingPath = canonicalSettingPath(pathValue)
+  if (!settingPath) return null
+  const definition = LOCAL_SETTING_DEFINITIONS.find(setting => setting.path === settingPath)
+  const oldValue = localSettingValue(config, settingPath)
+  if (!definition || oldValue === null) return null
+  const newValue = requestedValue === null ? !oldValue : requestedValue
+
+  const nextConfig = settingPath === 'bedwars.tablist.show_respawn_timer'
+    ? {
+      ...config,
+      bedWars: {
+        ...config.bedWars,
+        respawnTimerEnabled: newValue
+      }
+    }
+    : {
+      ...config,
+      splitReminder: {
+        ...config.splitReminder,
+        enabled: newValue
+      }
+    }
+
+  return {
+    config: normalizeAppConfig(nextConfig),
+    path: settingPath,
+    displayName: definition.displayName,
+    oldValue,
+    newValue
+  }
+}
+
 function dashboardStatus() {
   const route = currentRoute()
   return {
@@ -263,6 +387,7 @@ function dashboardStatus() {
     activeSessions,
     route,
     routes: ROUTES,
+    bedWars: appConfig.bedWars,
     splitReminder: appConfig.splitReminder,
     logs: appLogs.slice(-120)
   }
@@ -415,45 +540,6 @@ function replaceNamesInChatString(text: unknown, nicknames: Map<string, string>)
   }
 }
 
-function createSplitReminderState(): SplitReminderState {
-  return {
-    respawning: false,
-    splitPending: false,
-    splitSignalId: 0,
-    lastTrigger: '',
-    preRespawnTrigger: '',
-    preRespawnTriggerAt: 0,
-    lastTeamSignature: '',
-    stableTeamColorName: '',
-    stableTeamPlayersByKey: new Map(),
-    stableTeamMaxPlayers: 0,
-    stableTeamMaxPlayersSource: '',
-    lastModeLogSignature: '',
-    bedWarsGameStartedAt: 0,
-    bedWarsPregameSeenAt: 0,
-    bedWarsScoreboardCountdownVisible: false,
-    bedWarsGameActive: false
-  }
-}
-
-function resetSplitReminderMatchState(state: SplitReminderState, bedWarsGameActive = false, now = Date.now()) {
-  state.respawning = false
-  state.splitPending = false
-  state.splitSignalId = 0
-  state.lastTrigger = ''
-  state.preRespawnTrigger = ''
-  state.preRespawnTriggerAt = 0
-  state.lastTeamSignature = ''
-  state.stableTeamColorName = ''
-  state.stableTeamPlayersByKey.clear()
-  state.stableTeamMaxPlayers = 0
-  state.stableTeamMaxPlayersSource = ''
-  state.bedWarsGameStartedAt = bedWarsGameActive ? now : 0
-  state.bedWarsPregameSeenAt = 0
-  state.bedWarsScoreboardCountdownVisible = false
-  state.bedWarsGameActive = bedWarsGameActive
-}
-
 function safePatternMatch(text: string, patterns: string[]): boolean {
   for (const pattern of patterns) {
     try {
@@ -483,6 +569,38 @@ function isTeammateDeathText(text: string, settings: SplitReminderSettings): boo
 
 function isLocalRespawnCountdownText(text: string): boolean {
   return /\byou will respawn in \d+ seconds?[.!]?$/i.test(stripColors(text).trim())
+}
+
+function localRespawnCountdownSeconds(text: string): number | null {
+  const match = /\byou will respawn in (\d+) seconds?[.!]?$/i.exec(stripColors(text).trim())
+  if (!match) return null
+  const seconds = Number(match[1])
+  return Number.isInteger(seconds) && seconds > 0 ? seconds : null
+}
+
+function isLocalDeathTitleText(text: string): boolean {
+  return /^\s*YOU DIED[.!]?\s*$/i.test(stripColors(text))
+}
+
+function packetHasLocalDeathTitleText(value: any): boolean {
+  if (value == null) return false
+  if (typeof value === 'string') {
+    if (isLocalDeathTitleText(value)) return true
+    try {
+      return packetHasLocalDeathTitleText(JSON.parse(value))
+    } catch {
+      return false
+    }
+  }
+  if (Array.isArray(value)) {
+    if (isLocalDeathTitleText(flattenChatToText(value))) return true
+    return value.some(packetHasLocalDeathTitleText)
+  }
+  if (typeof value === 'object') {
+    if (isLocalDeathTitleText(flattenChatToText(value))) return true
+    return Object.values(value).some(packetHasLocalDeathTitleText)
+  }
+  return false
 }
 
 function isLocalRespawnCompleteText(text: string): boolean {
@@ -593,6 +711,8 @@ function updateBedWarsGameStateFromText(
     retainLocalBedWarsTabTeams(sessionState, localPlayerName)
   } else {
     sessionState?.teams.clear()
+    sessionState?.knownTeamByPlayerKey.clear()
+    sessionState?.knownTeamsByPlayerKey.clear()
   }
 
   if (event === 'start') {
@@ -612,12 +732,33 @@ function playerKey(name: string): string {
   return stripColors(name).trim().toLowerCase()
 }
 
+function offlinePlayerUuid(playerName: string): string {
+  const bytes = crypto.createHash('md5').update(`OfflinePlayer:${playerName}`, 'utf8').digest()
+  bytes[6] = (bytes[6] & 0x0f) | 0x30
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = bytes.toString('hex')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
 function teamHasPlayer(team: TeamState, playerName: string): boolean {
   const target = playerKey(playerName)
   for (const player of team.players) {
     if (playerKey(player) === target) return true
   }
   return false
+}
+
+function isTrackedBedWarsPlayer(
+  state: SessionState,
+  splitState: SplitReminderState,
+  playerName: string
+): boolean {
+  const key = playerKey(playerName)
+  if (!state.knownPlayersByName.has(key)) return false
+  if (splitState.stableTeamPlayersByKey.has(key)) return true
+  if (state.knownTeamByPlayerKey.has(key)) return true
+  if (state.knownTeamsByPlayerKey.has(key)) return true
+  return Array.from(state.teams.values()).some(team => teamHasPlayer(team, playerName))
 }
 
 function localPlayerIdentityNames(state: SessionState, localPlayerName: string): string[] {
@@ -1203,6 +1344,135 @@ function isLocalTeammateDeathText(
   return { match: false, player, reason: 'non_teammate', team: localTeam.primaryTeam, teammates }
 }
 
+function localRespawnPlayerName(
+  sessionState: SessionState,
+  localPlayerName: string,
+  splitState: SplitReminderState
+): string | null {
+  const identityNames = localPlayerIdentityNames(sessionState, localPlayerName)
+  const realPlayerKey = playerKey(localPlayerName)
+  const preferredIdentity = (names: string[]): string | null => {
+    return names.find(name => playerKey(name) !== realPlayerKey)
+      || names[0]
+      || null
+  }
+
+  const stableRosterNames = identityNames
+    .map(identityName => splitState.stableTeamPlayersByKey.get(playerKey(identityName)))
+    .filter((name): name is string => typeof name === 'string')
+  const stableRosterName = preferredIdentity(stableRosterNames)
+  if (stableRosterName) return stableRosterName
+
+  for (const team of sessionState.teams.values()) {
+    if (!teamHasLocalPlayer(sessionState, team, localPlayerName)) continue
+    const rosterName = preferredIdentity(
+      identityNames.filter(identityName => teamHasPlayer(team, identityName))
+    )
+    if (rosterName && validPlayerName(rosterName)) return rosterName
+  }
+
+  const uuidRosterKey = sessionState.playerNameByUuid.get(sessionState.localPlayerUuid)
+  const uuidRosterPlayer = uuidRosterKey
+    ? sessionState.knownPlayersByName.get(uuidRosterKey)
+    : null
+  if (typeof uuidRosterPlayer?.name === 'string') return uuidRosterPlayer.name
+
+  return identityNames
+    .find(name => sessionState.knownPlayersByName.has(playerKey(name))) || null
+}
+
+function respawnDeathPlayerName(
+  text: string,
+  settings: SplitReminderSettings,
+  sessionState: SessionState,
+  localPlayerName: string,
+  splitState: SplitReminderState,
+  now = Date.now()
+): string | null {
+  if (!isLiveBedWarsMatch(sessionState, splitState) || /\bFINAL KILL!/i.test(stripColors(text))) return null
+  if (isLocalRespawnCountdownText(text)) return null
+
+  const clean = stripColors(text).trim()
+  const localDeath = isLocalDeathText(text, settings)
+
+  if (/^you\b/i.test(clean)) {
+    if (!localDeath && !isTeammateDeathText(text, settings)) return null
+    return localRespawnPlayerName(sessionState, localPlayerName, splitState)
+  }
+
+  const playerName = deathPlayerName(text)
+  if (!playerName) return null
+  const deathBody = clean.slice(playerName.length).trim()
+  if (/^[:>]/.test(deathBody)) return null
+  if (/^(?:disconnected|reconnected)\.$/i.test(deathBody)) return null
+  const teammateStyleDeath = isTeammateDeathText(text, settings)
+  const hypixelKillMessage = /^(?:(?:was|got|fell|slipped|tripped|lost|met|took|died|fought|stumbled|forgot|had|caught|played|howled|stepped|squeaked|hit|be)\b|didn't\b|'s heart was\b).+\.(?: FINAL KILL!)?$/i.test(deathBody)
+  return (teammateStyleDeath || hypixelKillMessage)
+    ? playerName
+    : null
+}
+
+function isLiveBedWarsMatch(
+  sessionState: SessionState,
+  splitState: SplitReminderState
+): boolean {
+  return splitState.bedWarsGameActive && sessionState.localGameMode !== 3
+}
+
+function reconnectedPlayerName(text: string): string | null {
+  const match = /^([A-Za-z0-9_]{1,16}) reconnected\.$/i.exec(stripColors(text).trim())
+  return match ? match[1] : null
+}
+
+function disconnectedWhileRespawningPlayerName(
+  playerName: string,
+  state: SessionState
+): string | null {
+  return state.playersByName.has(playerKey(playerName)) ? null : playerName
+}
+
+function bedWarsTeamColorFromChatComponent(
+  comp: any,
+  playerName: string,
+  inheritedColor = ''
+): string | null {
+  if (typeof comp === 'string') {
+    const playerAt = comp.toLowerCase().indexOf(playerName.toLowerCase())
+    if (playerAt < 0) return null
+    const codes = Array.from(comp.slice(0, playerAt).matchAll(/\u00a7([0-9a-f])/gi))
+    const legacyColor = codes.length
+      ? BEDWARS_LEGACY_CHAT_TEAM_FORMAT[codes[codes.length - 1][1].toLowerCase()]
+      : ''
+    return BEDWARS_CHAT_TEAM_FORMAT[legacyColor]?.colorName
+      || BEDWARS_CHAT_TEAM_FORMAT[inheritedColor.toLowerCase()]?.colorName
+      || null
+  }
+  if (Array.isArray(comp)) {
+    for (const child of comp) {
+      const color = bedWarsTeamColorFromChatComponent(child, playerName, inheritedColor)
+      if (color) return color
+    }
+    return null
+  }
+  if (!comp || typeof comp !== 'object') return null
+
+  const color = typeof comp.color === 'string' ? comp.color : inheritedColor
+  for (const field of ['extra', 'with']) {
+    if (!Array.isArray(comp[field])) continue
+    const childColor = bedWarsTeamColorFromChatComponent(comp[field], playerName, color)
+    if (childColor) return childColor
+  }
+  if (typeof comp.text === 'string' && new RegExp(`\\b${escapeRegExp(playerName)}\\b`, 'i').test(comp.text)) {
+    const exactPlayerText = playerKey(comp.text) === playerKey(playerName)
+    const containsLegacyColor = /\u00a7[0-9a-f]/i.test(comp.text)
+    if (exactPlayerText || containsLegacyColor || !['gray', 'dark_gray'].includes(color.toLowerCase())) {
+      const legacyColor = bedWarsTeamColorFromChatComponent(comp.text, playerName, color)
+      if (legacyColor) return legacyColor
+    }
+  }
+  return null
+}
+
 function replaceRespawnedText(text: string, settings: SplitReminderSettings): string {
   const replacement = /[.!?]$/.test(settings.replacementText)
     ? settings.replacementText
@@ -1773,7 +2043,9 @@ function playerInfoProfile(player: any, state?: SessionState): any | null {
   if (typeof player?.name === 'string') return player
   if (!state) return null
   const key = state.playerNameByUuid.get(uuidKey(player?.uuid))
-  return key ? state.playersByName.get(key) || null : null
+  return key
+    ? state.playersByName.get(key) || state.knownPlayersByName.get(key) || null
+    : null
 }
 
 function withNicknamePlayerInfo(packet: any, nicknames: Map<string, string>, state?: SessionState): any {
@@ -1801,8 +2073,165 @@ function withNicknamePlayerInfo(packet: any, nicknames: Map<string, string>, sta
   return { ...packet, data: nextPlayers }
 }
 
+function displayNameComponent(displayName: string | null, fallbackName: string): any {
+  if (!displayName) return { text: fallbackName }
+  try {
+    return JSON.parse(displayName)
+  } catch {
+    return legacyFormattedComponent(displayName)
+  }
+}
+
+function respawnTimerPlayerSnapshot(
+  player: any,
+  state: SessionState,
+  fallbackTeamColorName = ''
+): any {
+  const teamCandidates = Array.from(new Set([
+    ...state.teams.values(),
+    ...state.knownTeamByPlayerKey.values(),
+    ...(typeof player?.name === 'string'
+      ? state.knownTeamsByPlayerKey.get(playerKey(player.name))?.values() || []
+      : [])
+  ]))
+  const colorMatchedTeam = fallbackTeamColorName
+    ? teamCandidates.find(candidate => teamColorName(candidate) === fallbackTeamColorName)
+    : null
+  const team = typeof player?.name === 'string'
+    ? colorMatchedTeam
+      || nicknameDisplayTeam(state, player.name)
+      || state.knownTeamByPlayerKey.get(playerKey(player.name))
+    : colorMatchedTeam
+  const resolvedColorName = fallbackTeamColorName || (team ? teamColorName(team) || '' : '')
+  const resolvedFormat = Object.values(BEDWARS_CHAT_TEAM_FORMAT)
+    .find(candidate => candidate.colorName.toLowerCase() === resolvedColorName.toLowerCase())
+  if (!team) {
+    if (!resolvedFormat) return { ...player }
+    return {
+      ...player,
+      respawnTeamSnapshot: {
+        team: '',
+        packetName: '',
+        colorName: resolvedFormat.colorName,
+        prefix: `\u00a7${resolvedFormat.code}${resolvedFormat.letter} \u00a7${resolvedFormat.code}`,
+        suffix: ''
+      }
+    }
+  }
+  return {
+    ...player,
+    respawnTeamSnapshot: {
+      team: team.team,
+      packetName: team.packetName,
+      colorName: resolvedColorName,
+      prefix: resolvedFormat
+        ? `\u00a7${resolvedFormat.code}${resolvedFormat.letter} \u00a7${resolvedFormat.code}`
+        : team.prefix,
+      suffix: team.suffix
+    }
+  }
+}
+
+function respawnTimerDisplayName(
+  player: any,
+  nicknames: Map<string, string>,
+  state: SessionState,
+  remainingSeconds: number | null
+): string | null {
+  const displayName = localPlayerDisplayName(player, nicknames, state)
+  if (remainingSeconds === null) return displayName
+  const nickname = nicknameForPlayer(player?.name, nicknames)
+  const frozenTeam = player?.respawnTeamSnapshot
+  const basePlayerComponent = displayName
+    ? displayNameComponent(displayName, nickname || player.name)
+    : { text: nickname || player.name }
+  const displayText = displayName
+    ? flattenChatToText(displayNameComponent(displayName, nickname || player.name))
+    : ''
+  const frozenLegacyName = `${String(frozenTeam?.prefix || '')}${nickname || player.name}${String(frozenTeam?.suffix || '')}`
+  const playerComponent = frozenTeam
+    ? !displayName || playerKey(displayText) === playerKey(nickname || player.name)
+      ? legacyFormattedComponent(frozenLegacyName)
+      : {
+        text: '',
+        extra: [
+          legacyFormattedComponent(String(frozenTeam.prefix || '')),
+          basePlayerComponent,
+          legacyFormattedComponent(String(frozenTeam.suffix || ''))
+        ]
+      }
+    : basePlayerComponent
+  const respawningPlayerText = stripColors(flattenChatToText(playerComponent))
+
+  return JSON.stringify({
+    text: '',
+    extra: [
+      { text: `${remainingSeconds}s `, color: 'gold', bold: true },
+      { text: respawningPlayerText, color: 'gray' }
+    ]
+  })
+}
+
+function respawnTabRemovePacket(uuid: string): any {
+  return {
+    action: 'remove_player',
+    data: [{ uuid }]
+  }
+}
+
+function respawnTabAddPacket(
+  playerName: string,
+  displayName: string | null,
+  properties: any[] = []
+): any {
+  return {
+    action: 'add_player',
+    data: [{
+      uuid: offlinePlayerUuid(playerName),
+      name: playerName,
+      properties: Array.isArray(properties)
+        ? properties.map(property => ({ ...property }))
+        : [],
+      gamemode: 0,
+      ping: 0,
+      displayName
+    }]
+  }
+}
+
+function respawnTabDisplayPacket(playerName: string, displayName: string | null): any {
+  return {
+    action: 'update_display_name',
+    data: [{
+      uuid: offlinePlayerUuid(playerName),
+      displayName
+    }]
+  }
+}
+
 function withNicknameScoreboardTeam(packet: any, nicknames: Map<string, string>): any {
   return packet
+}
+
+function withRespawningPlayersKeptInTeam(
+  packet: any,
+  respawnTimers: ReturnType<typeof createRespawnTimerState>
+): any {
+  if (Number(packet?.mode) !== 4) return packet
+  const field = Array.isArray(packet?.players)
+    ? 'players'
+    : Array.isArray(packet?.entities)
+      ? 'entities'
+      : ''
+  if (!field) return packet
+
+  const players = packet[field] as string[]
+  const filtered = players.filter(playerName => {
+    return !respawnTimers.timersByPlayerKey.has(playerKey(playerName))
+  })
+  return filtered.length === players.length
+    ? packet
+    : { ...packet, [field]: filtered }
 }
 
 function withNicknameScoreboardScore(packet: any, nicknames: Map<string, string>): any {
@@ -1833,80 +2262,6 @@ function withNicknameEntityMetadata(packet: any, nicknames: Map<string, string>)
 
 function withNicknameNamedEntitySpawn(packet: any, nicknames: Map<string, string>): any {
   return withNicknameEntityMetadata(packet, nicknames)
-}
-
-function createSessionState(localPlayerName = '', localPlayerUuid = ''): SessionState {
-  const aliases = new Map<string, string>()
-  const cleanLocalPlayerName = stripColors(localPlayerName).trim()
-  if (validPlayerName(cleanLocalPlayerName)) aliases.set(playerKey(cleanLocalPlayerName), cleanLocalPlayerName)
-  return {
-    playersByName: new Map(),
-    playerNameByUuid: new Map(),
-    localPlayerUuid: uuidKey(localPlayerUuid),
-    localPlayerAliasesByKey: aliases,
-    teams: new Map(),
-    playerEntitiesByUuid: new Map(),
-    playerEntityUuidById: new Map(),
-    scores: new Map(),
-    displayedScoreboardObjectives: new Map()
-  }
-}
-
-function uuidKey(uuid: unknown): string {
-  return String(uuid || '').replace(/-/g, '').toLowerCase()
-}
-
-function clonePacketData(data: any): any {
-  if (!data || typeof data !== 'object') return data
-  return JSON.parse(JSON.stringify(data))
-}
-
-function mergeMetadata(existing: any[], incoming: any[]): any[] {
-  if (!Array.isArray(incoming)) return existing
-  const byKey = new Map<number, any>()
-  for (const item of Array.isArray(existing) ? existing : []) {
-    if (typeof item?.key === 'number') byKey.set(item.key, clonePacketData(item))
-  }
-  for (const item of incoming) {
-    if (typeof item?.key === 'number') byKey.set(item.key, clonePacketData(item))
-  }
-  return Array.from(byKey.values()).sort((a, b) => a.key - b.key)
-}
-
-function trackPlayerInfo(packet: any, state: SessionState) {
-  const players = Array.isArray(packet?.data) ? packet.data : []
-
-  if (isAction(packet.action, 'add_player', 0)) {
-    for (const player of players) {
-      if (typeof player?.name !== 'string') continue
-      const key = player.name.toLowerCase()
-      state.playersByName.set(key, clonePacketData(player))
-      state.playerNameByUuid.set(uuidKey(player.uuid), key)
-      if (state.localPlayerUuid && uuidKey(player.uuid) === state.localPlayerUuid) {
-        state.localPlayerAliasesByKey.set(playerKey(player.name), player.name)
-      }
-    }
-    return
-  }
-
-  if (isAction(packet.action, 'remove_player', 4)) {
-    for (const player of players) {
-      const key = state.playerNameByUuid.get(uuidKey(player?.uuid))
-      if (!key) continue
-      state.playerNameByUuid.delete(uuidKey(player.uuid))
-      state.playersByName.delete(key)
-    }
-    return
-  }
-
-  for (const player of players) {
-    const key = state.playerNameByUuid.get(uuidKey(player?.uuid))
-    const cached = key ? state.playersByName.get(key) : null
-    if (!cached) continue
-    if ('gamemode' in player) cached.gamemode = player.gamemode
-    if ('ping' in player) cached.ping = player.ping
-    if ('displayName' in player) cached.displayName = player.displayName
-  }
 }
 
 function registerLocalPlayerAlias(state: SessionState, playerName: string): boolean {
@@ -1943,41 +2298,6 @@ function localPlayerAliasFromChatEcho(text: string, sentMessage: string, state: 
   }
 
   return matches.length === 1 ? matches[0] : null
-}
-
-function teamPlayers(packet: any): string[] {
-  if (Array.isArray(packet?.players)) return packet.players
-  if (Array.isArray(packet?.entities)) return packet.entities
-  return []
-}
-
-function trackScoreboardTeam(packetName: string, packet: any, state: SessionState, nicknames: Map<string, string>) {
-  if (typeof packet?.team !== 'string') return
-
-  const mode = Number(packet.mode)
-  if (mode === 1) {
-    state.teams.delete(packet.team)
-    return
-  }
-
-  let team = state.teams.get(packet.team)
-  if (!team) {
-    team = { team: packet.team, packetName, prefix: '', suffix: '', players: new Set(), sentPlayers: new Set() }
-    state.teams.set(packet.team, team)
-  }
-  team.packetName = packetName
-  if (typeof packet.prefix === 'string') team.prefix = packet.prefix
-  if (typeof packet.suffix === 'string') team.suffix = packet.suffix
-
-  if (mode === 0) {
-    team.players = new Set(teamPlayers(packet))
-  } else if (mode === 3) {
-    for (const player of teamPlayers(packet)) team.players.add(player)
-  } else if (mode === 4) {
-    for (const player of teamPlayers(packet)) team.players.delete(player)
-  }
-
-  team.sentPlayers = new Set(team.players)
 }
 
 function teamColorName(team: TeamState): string | null {
@@ -2021,104 +2341,6 @@ function logLocalTeamIfChanged(state: SessionState, localPlayerName: string, spl
   term('QoL', `Team detected: ${snapshot.colorName || teamDisplayName(snapshot.primaryTeam)} (${players.join(', ')})`, colors.yellow)
 }
 
-function trackNamedEntitySpawn(packet: any, state: SessionState) {
-  if (typeof packet?.entityId !== 'number') return
-  const uuid = uuidKey(packet.playerUUID)
-  const entity: PlayerEntityState = {
-    entityId: packet.entityId,
-    uuid,
-    spawnPacket: clonePacketData(packet),
-    metadata: Array.isArray(packet.metadata) ? clonePacketData(packet.metadata) : [],
-    equipment: new Map()
-  }
-  state.playerEntitiesByUuid.set(uuid, entity)
-  state.playerEntityUuidById.set(packet.entityId, uuid)
-}
-
-function playerEntityForId(entityId: unknown, state: SessionState): PlayerEntityState | null {
-  if (typeof entityId !== 'number') return null
-  const uuid = state.playerEntityUuidById.get(entityId)
-  return uuid ? state.playerEntitiesByUuid.get(uuid) || null : null
-}
-
-function trackEntityMovement(packetName: string, packet: any, state: SessionState) {
-  const entity = playerEntityForId(packet?.entityId, state)
-  if (!entity) return
-
-  if (packetName === 'entity_teleport') {
-    for (const field of ['x', 'y', 'z', 'yaw', 'pitch']) {
-      if (typeof packet[field] === 'number') entity.spawnPacket[field] = packet[field]
-    }
-    return
-  }
-
-  if (packetName === 'rel_entity_move' || packetName === 'entity_move_look') {
-    entity.spawnPacket.x += Number(packet.dX || 0)
-    entity.spawnPacket.y += Number(packet.dY || 0)
-    entity.spawnPacket.z += Number(packet.dZ || 0)
-  }
-
-  if (packetName === 'entity_look' || packetName === 'entity_move_look') {
-    if (typeof packet.yaw === 'number') entity.spawnPacket.yaw = packet.yaw
-    if (typeof packet.pitch === 'number') entity.spawnPacket.pitch = packet.pitch
-  }
-}
-
-function trackEntityMetadata(packet: any, state: SessionState) {
-  const entity = playerEntityForId(packet?.entityId, state)
-  if (!entity) return
-  entity.metadata = mergeMetadata(entity.metadata, packet.metadata)
-  entity.spawnPacket.metadata = entity.metadata
-}
-
-function trackEntityEquipment(packet: any, state: SessionState) {
-  const entity = playerEntityForId(packet?.entityId, state)
-  if (!entity || typeof packet.slot !== 'number') return
-  entity.equipment.set(packet.slot, clonePacketData(packet))
-}
-
-function trackEntityDestroy(packet: any, state: SessionState) {
-  if (!Array.isArray(packet?.entityIds)) return
-  for (const entityId of packet.entityIds) {
-    const uuid = state.playerEntityUuidById.get(entityId)
-    if (!uuid) continue
-    state.playerEntityUuidById.delete(entityId)
-    state.playerEntitiesByUuid.delete(uuid)
-  }
-}
-
-function scoreKey(itemName: unknown, scoreName: unknown): string {
-  return `${String(scoreName)}\u0000${String(itemName).toLowerCase()}`
-}
-
-function trackScoreboardObjective(packet: any, state: SessionState) {
-  if (typeof packet?.name !== 'string' || Number(packet.action) !== 1) return
-  for (const [position, objectiveName] of state.displayedScoreboardObjectives) {
-    if (objectiveName === packet.name) state.displayedScoreboardObjectives.delete(position)
-  }
-}
-
-function trackScoreboardDisplayObjective(packet: any, state: SessionState) {
-  const position = Number(packet?.position)
-  if (!Number.isInteger(position)) return
-  if (typeof packet?.name !== 'string' || !packet.name) {
-    state.displayedScoreboardObjectives.delete(position)
-    return
-  }
-  state.displayedScoreboardObjectives.set(position, packet.name)
-}
-
-function trackScoreboardScore(packet: any, state: SessionState) {
-  if (typeof packet?.itemName !== 'string' || typeof packet?.scoreName !== 'string') return
-  const key = scoreKey(packet.itemName, packet.scoreName)
-  if (Number(packet.action) === 1) {
-    state.scores.delete(key)
-    return
-  }
-
-  state.scores.set(key, clonePacketData(packet))
-}
-
 function scoreboardLinesForItem(itemName: string, state: SessionState): string[] {
   const lines = [itemName]
 
@@ -2148,6 +2370,36 @@ function scoreboardModeTexts(state: SessionState): string[] {
   }
 
   return Array.from(new Set(lines))
+}
+
+function isActiveBedWarsMatchScoreboardText(text: string): boolean {
+  const clean = stripColors(text).replace(/\s+/g, ' ').trim()
+  return /\b(?:Diamond|Emerald)\s+[IVX]+\s+in\s+\d+:\d+\b/i.test(clean)
+}
+
+function scoreboardSidebarObjectiveWillChange(packet: any, state: SessionState): boolean {
+  if (Number(packet?.position) !== 1) return false
+  const currentObjective = state.displayedScoreboardObjectives.get(1) || ''
+  const nextObjective = typeof packet?.name === 'string' ? packet.name : ''
+  return currentObjective !== nextObjective
+}
+
+function removesDisplayedScoreboardObjective(packet: any, state: SessionState): boolean {
+  if (typeof packet?.name !== 'string' || Number(packet.action) !== 1) return false
+  return Array.from(state.displayedScoreboardObjectives.values())
+    .some(objectiveName => objectiveName === packet.name)
+}
+
+function restoreBedWarsGameStateFromScoreboard(
+  state: SessionState,
+  splitState: SplitReminderState,
+  now = Date.now()
+): boolean {
+  if (splitState.bedWarsGameActive) return false
+  if (state.localGameMode === 3) return false
+  if (!scoreboardModeTexts(state).some(isActiveBedWarsMatchScoreboardText)) return false
+  resetSplitReminderMatchState(splitState, true, now)
+  return true
 }
 
 function updateBedWarsModeFromScoreboard(
@@ -2672,7 +2924,14 @@ function bridgePlay(
   let lastLobbyWindowClickAt = 0
   let lastScoreboardAnalysisAt = 0
   let scoreboardAnalysisDeferred = false
+  let allowBedWarsScoreboardRecovery = true
   let recentLocalChat: { message: string; sentAt: number } | null = null
+  let lastRespawnDeathKey = ''
+  let lastRespawnDeathAt = 0
+  const respawnTimers = createRespawnTimerState()
+  const respawnProfilesByPlayerKey = new Map<string, any>()
+  const syntheticRespawnPlayers = new Set<string>()
+  const pendingRespawnDisconnectChecks = new Map<string, { playerName: string; checkAt: number }>()
   const transferWatch: TransferWatchState = {
     active: false,
     expiresAt: 0
@@ -2754,6 +3013,14 @@ function bridgePlay(
     logLocalTeamIfChanged(sessionState, downstream.username, splitReminderState)
   }
 
+  const recoverBedWarsStateFromScoreboard = () => {
+    if (!allowBedWarsScoreboardRecovery) return
+    if (!restoreBedWarsGameStateFromScoreboard(sessionState, splitReminderState)) return
+    allowBedWarsScoreboardRecovery = false
+    transferWatch.active = false
+    scoreboardAnalysisDeferred = false
+  }
+
   const analyzeTeamAfterGameStart = (previousGameStartedAt: number) => {
     if (!splitReminderState.bedWarsGameActive) return
     if (splitReminderState.bedWarsGameStartedAt === previousGameStartedAt) return
@@ -2762,6 +3029,144 @@ function bridgePlay(
     transferWatch.active = false
     analyzeScoreboard(true)
   }
+
+  const writeRespawnTimerPlayer = (
+    playerName: string,
+    remainingSeconds: number | null,
+    scheduleDisconnectCheck = true
+  ) => {
+    const key = playerKey(playerName)
+    const player = respawnProfilesByPlayerKey.get(key)
+      || sessionState.knownPlayersByName.get(key)
+    if (!player || downstream.state !== 'play') return
+    const syntheticUuid = offlinePlayerUuid(playerName)
+
+    try {
+      if (remainingSeconds !== null) {
+        const displayName = respawnTimerDisplayName(player, nicknames, sessionState, remainingSeconds)
+        if (!syntheticRespawnPlayers.has(key)) {
+          downstream.write('player_info', respawnTabRemovePacket(player.uuid))
+          downstream.write('player_info', respawnTabAddPacket(playerName, displayName, player.properties))
+          syntheticRespawnPlayers.add(key)
+        } else {
+          downstream.write('player_info', respawnTabDisplayPacket(playerName, displayName))
+        }
+        return
+      }
+
+      if (syntheticRespawnPlayers.delete(key)) {
+        downstream.write('player_info', respawnTabRemovePacket(syntheticUuid))
+      }
+      const activePlayer = sessionState.playersByName.get(key)
+      if (activePlayer) {
+        const restorePacket = withNicknamePlayerInfo({
+          action: 'add_player',
+          data: [activePlayer]
+        }, nicknames, sessionState)
+        downstream.write('player_info', restorePacket)
+      }
+      if (scheduleDisconnectCheck) {
+        pendingRespawnDisconnectChecks.set(key, {
+          playerName,
+          checkAt: Date.now() + 500
+        })
+      }
+    } catch {}
+  }
+
+  const sendRespawnDisconnectMessage = (playerName: string) => {
+    if (downstream.state !== 'play') return
+    try {
+      downstream.write('chat', {
+        message: JSON.stringify({
+          text: '',
+          extra: [
+            { text: playerName, color: 'gold' },
+            { text: ' disconnected while respawning.', color: 'gray' }
+          ]
+        }),
+        position: 0
+      })
+    } catch {}
+  }
+
+  const flushRespawnTimers = (now = Date.now()) => {
+    if (!appConfig.bedWars.respawnTimerEnabled || !isLiveBedWarsMatch(sessionState, splitReminderState)) {
+      if (
+        respawnTimers.timersByPlayerKey.size
+        || pendingRespawnDisconnectChecks.size
+        || syntheticRespawnPlayers.size
+      ) {
+        clearActiveRespawnTimers(true)
+      }
+      return
+    }
+    for (const update of collectRespawnTimerUpdates(respawnTimers, now)) {
+      writeRespawnTimerPlayer(update.playerName, update.remainingSeconds)
+    }
+    for (const [key, pending] of pendingRespawnDisconnectChecks) {
+      if (now < pending.checkAt) continue
+      pendingRespawnDisconnectChecks.delete(key)
+      const disconnectedPlayer = disconnectedWhileRespawningPlayerName(pending.playerName, sessionState)
+      if (disconnectedPlayer) {
+        sendRespawnDisconnectMessage(disconnectedPlayer)
+      }
+      respawnProfilesByPlayerKey.delete(key)
+    }
+  }
+
+  const clearActiveRespawnTimers = (restoreDisplayNames: boolean) => {
+    const playerNames = clearRespawnTimers(respawnTimers)
+    for (const playerName of playerNames) {
+      const key = playerKey(playerName)
+      if (restoreDisplayNames) {
+        writeRespawnTimerPlayer(playerName, null, false)
+      } else {
+        try {
+          if (syntheticRespawnPlayers.delete(key) && downstream.state === 'play') {
+            downstream.write('player_info', respawnTabRemovePacket(offlinePlayerUuid(playerName)))
+          }
+        } catch {}
+        respawnProfilesByPlayerKey.delete(key)
+      }
+    }
+    pendingRespawnDisconnectChecks.clear()
+    if (!restoreDisplayNames) respawnProfilesByPlayerKey.clear()
+  }
+
+  const resetForScoreboardTransition = () => {
+    clearActiveRespawnTimers(false)
+    resetSplitReminderMatchState(splitReminderState, false)
+    allowBedWarsScoreboardRecovery = true
+    lastRespawnDeathKey = ''
+    lastRespawnDeathAt = 0
+  }
+
+  const beginRespawnTimer = (
+    playerName: string,
+    now: number,
+    durationMs?: number,
+    fallbackTeamColorName = ''
+  ) => {
+    if (!appConfig.bedWars.respawnTimerEnabled) return
+    const key = playerKey(playerName)
+    const player = sessionState.knownPlayersByName.get(key) || {
+      uuid: offlinePlayerUuid(playerName),
+      name: playerName,
+      properties: [],
+      gamemode: 0,
+      ping: 0,
+      displayName: null
+    }
+    const snapshot = respawnTimerPlayerSnapshot(player, sessionState, fallbackTeamColorName)
+    respawnProfilesByPlayerKey.set(key, snapshot)
+    pendingRespawnDisconnectChecks.delete(key)
+    startRespawnTimer(respawnTimers, playerName, now, durationMs)
+    flushRespawnTimers(now)
+  }
+
+  const respawnTimerInterval = setInterval(() => flushRespawnTimers(), 250)
+  respawnTimerInterval.unref?.()
 
   upstream.on('raw', (buffer: Buffer, meta: any) => {
     if (upstream.state !== 'play' || downstream.state !== 'play') return
@@ -2784,7 +3189,11 @@ function bridgePlay(
 
     try {
       if (meta.name === 'login' || meta.name === 'respawn') {
+        trackLocalGameMode(data, sessionState)
         startTransferWatch()
+        if (!isLiveBedWarsMatch(sessionState, splitReminderState)) {
+          clearActiveRespawnTimers(true)
+        }
       }
       if (meta.name === 'chat') {
         const raw = (data as any).message
@@ -2811,6 +3220,10 @@ function bridgePlay(
           recentLocalChat = null
         }
         const gameStartedAtBeforeChat = splitReminderState.bedWarsGameStartedAt
+        const gameEvent = bedWarsGameEvent(flattenChatToText(comp))
+        if (gameEvent === 'start' || gameEvent === 'end' || isBedWarsPregameCountdown(flattenChatToText(comp))) {
+          allowBedWarsScoreboardRecovery = false
+        }
         const pendingBeforeChat = splitReminderState.splitPending
         const splitSignalBeforeChat = splitReminderState.splitSignalId
         withSplitReminderChatComponent(
@@ -2824,6 +3237,58 @@ function bridgePlay(
             log: message => term('QoL', message, colors.yellow)
           }
         )
+        if (splitReminderState.bedWarsGameStartedAt !== gameStartedAtBeforeChat) {
+          clearActiveRespawnTimers(false)
+        }
+        const deathText = flattenChatToText(comp)
+        const localCountdownSeconds = localRespawnCountdownSeconds(deathText)
+        if (localCountdownSeconds !== null && isLiveBedWarsMatch(sessionState, splitReminderState)) {
+          const localRespawnName = localRespawnPlayerName(
+            sessionState,
+            downstream.username,
+            splitReminderState
+          )
+          if (localRespawnName) {
+            const currentSeconds = respawnTimerSeconds(respawnTimers, localRespawnName, now)
+            if (currentSeconds === null || localCountdownSeconds > currentSeconds + 1) {
+              beginRespawnTimer(
+                localRespawnName,
+                now,
+                localCountdownSeconds * 1000,
+                splitReminderState.stableTeamColorName
+              )
+            }
+          }
+        }
+        const deadPlayer = respawnDeathPlayerName(
+          deathText,
+          appConfig.splitReminder,
+          sessionState,
+          downstream.username,
+          splitReminderState,
+          now
+        )
+        if (deadPlayer) {
+          const deathKey = `${playerKey(deadPlayer)}:${stripColors(deathText)}`
+          if (deathKey !== lastRespawnDeathKey || now - lastRespawnDeathAt > 1000) {
+            lastRespawnDeathKey = deathKey
+            lastRespawnDeathAt = now
+            beginRespawnTimer(
+              deadPlayer,
+              now,
+              undefined,
+              bedWarsTeamColorFromChatComponent(comp, deadPlayer) || ''
+            )
+          }
+        }
+        const reconnectedPlayer = reconnectedPlayerName(deathText)
+        if (
+          reconnectedPlayer
+          && isLiveBedWarsMatch(sessionState, splitReminderState)
+          && isTrackedBedWarsPlayer(sessionState, splitReminderState, reconnectedPlayer)
+        ) {
+          beginRespawnTimer(reconnectedPlayer, now, BEDWARS_RECONNECT_RESPAWN_MS)
+        }
         analyzeTeamAfterGameStart(gameStartedAtBeforeChat)
         if (splitReminderState.splitPending && splitReminderState.splitSignalId !== splitSignalBeforeChat) {
           splitSoundEventId += 1
@@ -2857,6 +3322,25 @@ function bridgePlay(
 
       if (meta.name === 'title' || meta.name === 'set_title_text' || meta.name === 'set_title_subtitle' || meta.name === 'set_action_bar_text') {
         const gameStartedAtBeforeTitle = splitReminderState.bedWarsGameStartedAt
+        const titleNow = Date.now()
+        if (packetHasLocalDeathTitleText(data) && isLiveBedWarsMatch(sessionState, splitReminderState)) {
+          const localRespawnName = localRespawnPlayerName(
+            sessionState,
+            downstream.username,
+            splitReminderState
+          )
+          if (
+            localRespawnName
+            && respawnTimerSeconds(respawnTimers, localRespawnName, titleNow) === null
+          ) {
+            beginRespawnTimer(
+              localRespawnName,
+              titleNow,
+              undefined,
+              splitReminderState.stableTeamColorName
+            )
+          }
+        }
         const pendingBeforeTitle = splitReminderState.splitPending
         const trigger = splitReminderState.lastTrigger
         const updated = withSplitReminderPacket(
@@ -2864,7 +3348,7 @@ function bridgePlay(
           data,
           splitReminderState,
           appConfig.splitReminder,
-          Date.now(),
+          titleNow,
           sessionState,
           downstream.username
         )
@@ -2924,7 +3408,8 @@ function bridgePlay(
         const rosterMayHaveChanged = playerInfoMayChangeBedWarsRoster(data)
         trackPlayerInfo(data, sessionState)
         if (rosterMayHaveChanged) analyzeScoreboard(true)
-        downstream.write(meta.name, withNicknamePlayerInfo(data, nicknames, sessionState))
+        const withNicknames = withNicknamePlayerInfo(data, nicknames, sessionState)
+        downstream.write(meta.name, withNicknames)
         const playerNames = (Array.isArray((data as any)?.data) ? (data as any).data : [])
           .map((player: any) => playerInfoProfile(player, sessionState)?.name)
           .filter((name: unknown): name is string => typeof name === 'string')
@@ -2936,9 +3421,11 @@ function bridgePlay(
         const previousPlayers = typeof (data as any)?.team === 'string'
           ? Array.from(sessionState.teams.get((data as any).team)?.players || [])
           : []
+        const downstreamTeamPacket = withRespawningPlayersKeptInTeam(data, respawnTimers)
         trackScoreboardTeam(meta.name, data, sessionState, nicknames)
+        recoverBedWarsStateFromScoreboard()
         analyzeScoreboard()
-        downstream.write(meta.name, withNicknameScoreboardTeam(data, nicknames))
+        downstream.write(meta.name, withNicknameScoreboardTeam(downstreamTeamPacket, nicknames))
         const currentPlayers = typeof (data as any)?.team === 'string'
           ? Array.from(sessionState.teams.get((data as any).team)?.players || [])
           : []
@@ -2949,6 +3436,9 @@ function bridgePlay(
       }
 
       if (meta.name === 'scoreboard_objective') {
+        if (removesDisplayedScoreboardObjective(data, sessionState)) {
+          resetForScoreboardTransition()
+        }
         trackScoreboardObjective(data, sessionState)
         downstream.write(meta.name, data)
         if (apolloNickname.configured) {
@@ -2958,7 +3448,11 @@ function bridgePlay(
       }
 
       if (meta.name === 'scoreboard_display_objective') {
+        if (scoreboardSidebarObjectiveWillChange(data, sessionState)) {
+          resetForScoreboardTransition()
+        }
         trackScoreboardDisplayObjective(data, sessionState)
+        recoverBedWarsStateFromScoreboard()
         downstream.write(meta.name, data)
         if (apolloNickname.configured) {
           refreshApolloNametags(downstream, sessionState, nicknames)
@@ -2968,6 +3462,7 @@ function bridgePlay(
 
       if (meta.name === 'scoreboard_score') {
         trackScoreboardScore(data, sessionState)
+        recoverBedWarsStateFromScoreboard()
         analyzeScoreboard()
         downstream.write(meta.name, withNicknameScoreboardScore(data, nicknames))
         if (typeof (data as any)?.itemName === 'string') {
@@ -3056,6 +3551,85 @@ function bridgePlay(
         return
       }
 
+      const settingCommand = parseSettingCommand(message)
+      if (settingCommand?.action === 'list') {
+        sendClientChat(downstream, { text: '------- Local Proxy Settings -------', color: 'dark_aqua' })
+        for (const setting of LOCAL_SETTING_DEFINITIONS) {
+          const enabled = localSettingValue(appConfig, setting.path) === true
+          sendClientChat(downstream, {
+            text: '',
+            extra: [
+              {
+                text: enabled ? 'ON ' : 'OFF ',
+                color: enabled ? 'green' : 'red',
+                bold: true,
+                clickEvent: { action: 'run_command', value: `/setting ${setting.path}` },
+                hoverEvent: { action: 'show_text', value: { text: 'Click to toggle', color: 'yellow' } }
+              },
+              { text: setting.displayName, color: 'yellow' },
+              { text: ` (${setting.path})`, color: 'gray' }
+            ]
+          })
+        }
+        sendClientChat(downstream, {
+          text: 'Click ON/OFF or use /setting <path> [on|off]',
+          color: 'gray'
+        })
+        return
+      }
+
+      if (settingCommand?.action === 'change') {
+        const change = changeLocalSetting(appConfig, settingCommand.path, settingCommand.value)
+        if (!change) {
+          sendClientChat(downstream, {
+            text: `[Settings] Unknown setting: ${settingCommand.path}`,
+            color: 'red'
+          })
+          sendClientChat(downstream, {
+            text: '[Settings] Use /setting to list available settings.',
+            color: 'yellow'
+          })
+          return
+        }
+
+        updateAppConfig(change.config)
+        if (change.path === 'bedwars.tablist.show_respawn_timer' && !change.newValue) {
+          clearActiveRespawnTimers(true)
+        }
+        term(
+          'Settings',
+          `${change.displayName}: ${change.oldValue ? 'ON' : 'OFF'} -> ${change.newValue ? 'ON' : 'OFF'}.`,
+          colors.yellow
+        )
+        sendClientChat(downstream, {
+          text: '',
+          extra: [
+            { text: '[Settings] Changed ', color: 'gray' },
+            { text: change.displayName, color: 'yellow' },
+            { text: ` from ${change.oldValue ? 'ON' : 'OFF'} to `, color: 'gray' },
+            {
+              text: change.newValue ? 'ON' : 'OFF',
+              color: change.newValue ? 'green' : 'red',
+              bold: true
+            },
+            { text: '.', color: 'gray' }
+          ]
+        })
+        return
+      }
+
+      if (settingCommand?.action === 'help') {
+        sendClientChat(downstream, {
+          text: '[Settings] Usage: /setting <path> [on|off]',
+          color: 'yellow'
+        })
+        sendClientChat(downstream, {
+          text: '[Settings] Leave out on/off to toggle. Use /setting to list settings.',
+          color: 'gray'
+        })
+        return
+      }
+
       const nicknameCommand = parseNicknameCommand(message)
       if (nicknameCommand?.action === 'list') {
         const list = nicknameListPage(nicknames, nicknameCommand.page)
@@ -3136,6 +3710,14 @@ function bridgePlay(
       term('Bridge', `Dropped downstream packet ${meta.name}: ${errorMessage(error)}`, colors.red)
     }
   })
+
+  return () => {
+    clearInterval(respawnTimerInterval)
+    clearRespawnTimers(respawnTimers)
+    pendingRespawnDisconnectChecks.clear()
+    respawnProfilesByPlayerKey.clear()
+    syntheticRespawnPlayers.clear()
+  }
 }
 
 export const __test = {
@@ -3143,6 +3725,11 @@ export const __test = {
   createSessionState,
   cleanWindowTitle,
   deathPlayerName,
+  respawnDeathPlayerName,
+  reconnectedPlayerName,
+  disconnectedWhileRespawningPlayerName,
+  bedWarsTeamColorFromChatComponent,
+  offlinePlayerUuid,
   isLocalTeammateDeathText,
   isLobbySelectorWindowTitle,
   localPlayerAliasFromChatEcho,
@@ -3152,10 +3739,15 @@ export const __test = {
   legacyFormattedComponent,
   localPlayerNametagComponent,
   localPlayerNametagLines,
+  localRespawnPlayerName,
   localPlayerTeam,
   localTeammateNames,
   nicknameListPage,
   parseNicknameCommand,
+  parseSettingCommand,
+  canonicalSettingPath,
+  localSettingValue,
+  changeLocalSetting,
   playerInfoMayChangeBedWarsRoster,
   shouldExtendTransferWatchFromChunk,
   refreshApolloNametags,
@@ -3167,25 +3759,39 @@ export const __test = {
   serverListPlayers,
   serverListStatusResponse,
   trackNamedEntitySpawn,
+  trackLocalGameMode,
   trackPlayerInfo,
   trackScoreboardTeam,
   trackScoreboardObjective,
   trackScoreboardDisplayObjective,
   trackScoreboardScore,
   updateBedWarsModeFromScoreboard,
+  restoreBedWarsGameStateFromScoreboard,
+  isActiveBedWarsMatchScoreboardText,
+  scoreboardSidebarObjectiveWillChange,
+  removesDisplayedScoreboardObjective,
+  isLiveBedWarsMatch,
   withSplitReminderChatComponent,
   withSplitReminderPacket,
   withSplitReminderUnknownPacket,
   forcedSplitTitlePacket,
   packetHasRespawnedTitleText,
+  packetHasLocalDeathTitleText,
+  localRespawnCountdownSeconds,
   splitTitleSubtitlePacket,
   splitTitleTimingPacket,
   shouldRawForwardUpstreamPacket,
   withNicknameEntityMetadata,
   withNicknameNamedEntitySpawn,
   withNicknamePlayerInfo,
+  respawnTimerDisplayName,
+  respawnTimerPlayerSnapshot,
+  respawnTabRemovePacket,
+  respawnTabAddPacket,
+  respawnTabDisplayPacket,
   withNicknameScoreboardScore,
-  withNicknameScoreboardTeam
+  withNicknameScoreboardTeam,
+  withRespawningPlayersKeptInTeam
 }
 
 export function startProxy(): Server {
@@ -3294,10 +3900,12 @@ export function startProxy(): Server {
     let upstreamSessionReady = false
     let microsoftAuthCompleteLogged = false
     let detachedAuth = false
+    let cleanupPlayBridge = () => {}
 
     const keepMicrosoftAuthRunning = (why: string) => {
       if (localClosed) return
       localClosed = true
+      cleanupPlayBridge()
       closeSessionCounter()
       detachedAuth = true
       logSessionClosed(`${why}; Microsoft sign-in is still running`)
@@ -3307,6 +3915,7 @@ export function startProxy(): Server {
     const closeBoth = (why: string) => {
       if (localClosed) return
       localClosed = true
+      cleanupPlayBridge()
       closeSessionCounter()
       if (!downstreamEnded) endClient(downstream, JSON.stringify({ text: why }))
       endClient(upstream, why)
@@ -3321,7 +3930,7 @@ export function startProxy(): Server {
     }
 
     bridgeLogin(upstream, downstream)
-    bridgePlay(upstream, downstream, nicknames, sessionState, splitReminderState)
+    cleanupPlayBridge = bridgePlay(upstream, downstream, nicknames, sessionState, splitReminderState)
 
     upstream.on('session', () => {
       upstreamSessionReady = true

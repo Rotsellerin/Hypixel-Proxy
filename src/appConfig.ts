@@ -19,8 +19,13 @@ export type SplitReminderSettings = {
   teammateDeathPatterns: string[]
 }
 
+export type BedWarsSettings = {
+  respawnTimerEnabled: boolean
+}
+
 export type AppConfig = {
   routeId: RouteId
+  bedWars: BedWarsSettings
   splitReminder: SplitReminderSettings
 }
 
@@ -82,6 +87,9 @@ export function createRouteCatalog(
 export function defaultAppConfig(): AppConfig {
   return {
     routeId: 'direct',
+    bedWars: {
+      respawnTimerEnabled: true
+    },
     splitReminder: { ...DEFAULT_SPLIT_REMINDER }
   }
 }
@@ -136,8 +144,16 @@ export function normalizeSplitReminderSettings(value: unknown): SplitReminderSet
 
 export function normalizeAppConfig(value: unknown): AppConfig {
   const raw = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  const rawBedWars = raw.bedWars && typeof raw.bedWars === 'object'
+    ? raw.bedWars as Record<string, unknown>
+    : {}
   return {
     routeId: normalizeRouteId(raw.routeId),
+    bedWars: {
+      respawnTimerEnabled: typeof rawBedWars.respawnTimerEnabled === 'boolean'
+        ? rawBedWars.respawnTimerEnabled
+        : true
+    },
     splitReminder: normalizeSplitReminderSettings(raw.splitReminder)
   }
 }

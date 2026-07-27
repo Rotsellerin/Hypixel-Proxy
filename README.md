@@ -101,15 +101,21 @@ These commands are local. They are not sent to Hypixel.
 /n <player> <nickname>
 /nr <player>
 /nl [page]
+/setting
+/setting <path> [on|off]
 ```
 
 Nicknames are saved in `state/nicknames.json`.
+
+`/setting` lists the proxy's local settings. Click a setting's ON/OFF state to toggle it, or use a Proxhy-style path directly, such as `/setting bedwars.tablist.show_respawn_timer off`. Settings are saved in `state/app-config.json` and are never sent to Hypixel.
 
 Nicknames are display-only aliases. The proxy keeps each player's real profile name, UUID, skin data, scoreboard identity, and team membership unchanged so capes and external stat tools continue to identify the real player. Chat and TAB replace only the name portion and keep Hypixel's existing rank/team prefix, colors, and suffix. On Lunar Client, the proxy also uses Apollo's UUID-targeted Nametag module for the nameplate above the player; clients without Apollo keep the original Minecraft nameplate.
 
 ## Split Reminder
 
 The local split reminder watches incoming chat for your respawn window and teammate death messages. If a teammate dies while you are waiting to respawn, the Windows app plays the embedded Minecraft pling notification and the next `RESPAWNED!` title is shown locally as `SPLIT!`. The app audio is independent of Minecraft's Jukebox/Note Blocks volume. Its volume slider and `Test sound` button are available in the QoL drawer, and the selected volume is saved in `state/launcher-settings.json`.
+
+During an active Bed Wars match, a player death adds a bold gold five-second respawn countdown before that player's gray name in TAB. The temporary entry stays in its normal team section, and Hypixel's usual colors return when the timer ends. A `Player reconnected.` message starts the longer ten-second reconnect timer instead. The original display text and any local nickname are preserved, and `FINAL KILL!` messages never start a timer. If the timer finishes and the player is still missing from Hypixel's TAB list after a short grace period, the proxy reports that the player disconnected while respawning. Changing server or game clears active timers and the cached sidebar before the next scoreboard is tracked.
 
 When you use Hypixel `/nick`, the proxy automatically links the temporary Hypixel name to your local account. It first uses the player UUID when available and can also learn the name from Hypixel's nick status or your next public chat message. Team detection and self-death filtering then use the temporary name for the rest of the session.
 
