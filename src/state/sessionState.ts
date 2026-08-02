@@ -31,6 +31,20 @@ export type SessionState = {
   displayedScoreboardObjectives: Map<number, string>
 }
 
+export type SessionStateSizes = {
+  activePlayers: number
+  knownPlayers: number
+  playerUuidMappings: number
+  localAliases: number
+  teams: number
+  knownPlayerTeams: number
+  knownTeamMemberships: number
+  playerEntities: number
+  entityIds: number
+  scores: number
+  displayedObjectives: number
+}
+
 function stripColors(text: string): string {
   return text.replace(/\u00a7[0-9A-FK-ORa-fk-or]/g, '')
 }
@@ -45,6 +59,20 @@ function playerKey(name: string): string {
 
 function teamFormattingLength(team: TeamState): number {
   return stripColors(`${team.prefix || ''}${team.suffix || ''}`).trim().length
+}
+
+function rememberTeamForPlayer(state: SessionState, playerName: string, team: TeamState) {
+  const key = playerKey(playerName)
+  let knownTeams = state.knownTeamsByPlayerKey.get(key)
+  if (!knownTeams) {
+    knownTeams = new Map()
+    state.knownTeamsByPlayerKey.set(key, knownTeams)
+  }
+  knownTeams.set(team.team, team)
+  const previous = state.knownTeamByPlayerKey.get(key)
+  if (!previous || teamFormattingLength(team) >= teamFormattingLength(previous)) {
+    state.knownTeamByPlayerKey.set(key, team)
+  }
 }
 
 function isAction(action: unknown, text: string, id: number): boolean {
@@ -195,19 +223,75 @@ export function trackScoreboardTeam(
   team.sentPlayers = new Set(team.players)
   if (mode === 0 || mode === 3) {
     for (const playerName of teamPlayers(packet)) {
-      const key = playerKey(playerName)
-      let knownTeams = state.knownTeamsByPlayerKey.get(key)
-      if (!knownTeams) {
-        knownTeams = new Map()
-        state.knownTeamsByPlayerKey.set(key, knownTeams)
-      }
-      knownTeams.set(team.team, team)
-      const previous = state.knownTeamByPlayerKey.get(key)
-      if (!previous || teamFormattingLength(team) >= teamFormattingLength(previous)) {
-        state.knownTeamByPlayerKey.set(key, team)
+      rememberTeamForPlayer(state, playerName, team)
+    }
+  }
+}
+
+export function sessionStateSizes(state: SessionState): SessionStateSizes {
+  let knownTeamMemberships = 0
+  for (const teams of state.knownTeamsByPlayerKey.values()) {
+    knownTeamMemberships += teams.size
+  }
+
+  return {
+    activePlayers: state.playersByName.size,
+    knownPlayers: state.knownPlayersByName.size,
+    playerUuidMappings: state.playerNameByUuid.size,
+    localAliases: state.localPlayerAliasesByKey.size,
+    teams: state.teams.size,
+    knownPlayerTeams: state.knownTeamByPlayerKey.size,
+    knownTeamMemberships,
+    playerEntities: state.playerEntitiesByUuid.size,
+    entityIds: state.playerEntityUuidById.size,
+    scores: state.scores.size,
+    displayedObjectives: state.displayedScoreboardObjectives.size
+  }
+}
+
+export function clearSessionEntityHistory(state: SessionState) {
+  state.playerEntitiesByUuid.clear()
+  state.playerEntityUuidById.clear()
+}
+
+export function pruneSessionHistory(
+  state: SessionState,
+  options: { clearEntities?: boolean; clearTeams?: boolean } = {}
+): { before: SessionStateSizes; after: SessionStateSizes } {
+  const before = sessionStateSizes(state)
+  const retainedPlayerKeys = new Set<string>(state.playersByName.keys())
+  for (const key of state.localPlayerAliasesByKey.keys()) retainedPlayerKeys.add(key)
+
+  if (state.localPlayerUuid) {
+    const localProfileKey = state.playerNameByUuid.get(state.localPlayerUuid)
+    if (localProfileKey) retainedPlayerKeys.add(localProfileKey)
+  }
+
+  for (const key of state.knownPlayersByName.keys()) {
+    if (!retainedPlayerKeys.has(key)) state.knownPlayersByName.delete(key)
+  }
+  for (const [uuid, key] of state.playerNameByUuid) {
+    if (uuid !== state.localPlayerUuid && !retainedPlayerKeys.has(key)) {
+      state.playerNameByUuid.delete(uuid)
+    }
+  }
+
+  state.knownTeamByPlayerKey.clear()
+  state.knownTeamsByPlayerKey.clear()
+  if (options.clearTeams) {
+    state.teams.clear()
+  } else {
+    for (const team of state.teams.values()) {
+      for (const playerName of team.players) {
+        if (retainedPlayerKeys.has(playerKey(playerName))) {
+          rememberTeamForPlayer(state, playerName, team)
+        }
       }
     }
   }
+
+  if (options.clearEntities) clearSessionEntityHistory(state)
+  return { before, after: sessionStateSizes(state) }
 }
 
 function playerEntityForId(entityId: unknown, state: SessionState): PlayerEntityState | null {
@@ -219,6 +303,14 @@ function playerEntityForId(entityId: unknown, state: SessionState): PlayerEntity
 export function trackNamedEntitySpawn(packet: any, state: SessionState) {
   if (typeof packet?.entityId !== 'number') return
   const uuid = uuidKey(packet.playerUUID)
+  const previousEntity = state.playerEntitiesByUuid.get(uuid)
+  if (previousEntity && previousEntity.entityId !== packet.entityId) {
+    state.playerEntityUuidById.delete(previousEntity.entityId)
+  }
+  const previousUuid = state.playerEntityUuidById.get(packet.entityId)
+  if (previousUuid && previousUuid !== uuid) {
+    state.playerEntitiesByUuid.delete(previousUuid)
+  }
   const entity: PlayerEntityState = {
     entityId: packet.entityId,
     uuid,

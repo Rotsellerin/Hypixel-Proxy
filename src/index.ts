@@ -7,10 +7,22 @@ import { apolloChannelRegistrationPacket, apolloJsonPacket, enableApolloNametagM
 import { startDashboard } from './dashboard'
 import { MsaCode, microsoftAuthPrompt } from './microsoftAuthPrompt'
 import {
+  BlockedNameContext,
+  BlockNickHistoryFile,
+  createBlockNickHistoryState,
+  observeBlockListChat,
+  parseBlockListCommand,
+  serializeBlockNickHistory,
+  trackBlockListCommand
+} from './state/blockNickHistory'
+import {
   SessionState,
   TeamState,
+  clearSessionEntityHistory,
   createSessionState,
+  pruneSessionHistory,
   scoreKey,
+  sessionStateSizes,
   teamPlayers,
   trackEntityDestroy,
   trackEntityEquipment,
@@ -38,7 +50,6 @@ import {
   respawnTimerSeconds,
   startRespawnTimer
 } from './state/respawnTimerState'
-
 type NicknameFile = { nicknames: Record<string, string> }
 type AppLogEntry = {
   time: string
@@ -96,6 +107,7 @@ const LISTEN_HOST = process.env.LISTEN_HOST || '127.0.0.1'
 const LISTEN_PORT = Number(process.env.LISTEN_PORT || 25565)
 const STATE_DIR = process.env.STATE_DIR || path.join(process.cwd(), 'state')
 const NICKNAME_PATH = path.join(STATE_DIR, 'nicknames.json')
+const BLOCK_NICK_HISTORY_PATH = path.join(STATE_DIR, 'block-nick-history.json')
 const AUTH_CACHE_DIR = path.join(STATE_DIR, 'auth-cache')
 const SERVER_ICON_PATH = path.join(process.cwd(), 'assets', 'server-icon.png')
 const LOCAL_ADDRESS = LISTEN_PORT === 25565 ? 'localhost' : `localhost:${LISTEN_PORT}`
@@ -116,6 +128,16 @@ const serverIcon = loadServerIcon()
 let upstreamStatusCache: UpstreamStatusSnapshot | null = null
 let upstreamStatusInFlight: Promise<UpstreamStatusSnapshot> | null = null
 let activeSessions = 0
+const activeSessionStates = new Set<SessionState>()
+const eventLoopLagSamples: number[] = []
+let nextEventLoopCheckAt = Date.now() + 1000
+const eventLoopDiagnosticsInterval = setInterval(() => {
+  const now = Date.now()
+  eventLoopLagSamples.push(Math.max(0, now - nextEventLoopCheckAt))
+  if (eventLoopLagSamples.length > 60) eventLoopLagSamples.shift()
+  nextEventLoopCheckAt = now + 1000
+}, 1000)
+eventLoopDiagnosticsInterval.unref?.()
 let splitSoundEventId = 0
 const VERSION_LABEL = (() => {
   try {
@@ -353,21 +375,24 @@ function changeLocalSetting(
   if (!definition || oldValue === null) return null
   const newValue = requestedValue === null ? !oldValue : requestedValue
 
-  const nextConfig = settingPath === 'bedwars.tablist.show_respawn_timer'
-    ? {
+  let nextConfig: AppConfig
+  if (settingPath === 'bedwars.tablist.show_respawn_timer') {
+    nextConfig = {
       ...config,
       bedWars: {
         ...config.bedWars,
         respawnTimerEnabled: newValue
       }
     }
-    : {
+  } else {
+    nextConfig = {
       ...config,
       splitReminder: {
         ...config.splitReminder,
         enabled: newValue
       }
     }
+  }
 
   return {
     config: normalizeAppConfig(nextConfig),
@@ -380,6 +405,27 @@ function changeLocalSetting(
 
 function dashboardStatus() {
   const route = currentRoute()
+  const memory = process.memoryUsage()
+  const stateTotals = {
+    activePlayers: 0,
+    knownPlayers: 0,
+    playerUuidMappings: 0,
+    localAliases: 0,
+    teams: 0,
+    knownPlayerTeams: 0,
+    knownTeamMemberships: 0,
+    playerEntities: 0,
+    entityIds: 0,
+    scores: 0,
+    displayedObjectives: 0
+  }
+  for (const state of activeSessionStates) {
+    const sizes = sessionStateSizes(state)
+    for (const key of Object.keys(stateTotals) as Array<keyof typeof stateTotals>) {
+      stateTotals[key] += sizes[key]
+    }
+  }
+  const lagTotal = eventLoopLagSamples.reduce((total, lag) => total + lag, 0)
   return {
     version: VERSION_LABEL,
     localAddress: LOCAL_ADDRESS,
@@ -389,6 +435,23 @@ function dashboardStatus() {
     routes: ROUTES,
     bedWars: appConfig.bedWars,
     splitReminder: appConfig.splitReminder,
+    diagnostics: {
+      process: {
+        uptimeSeconds: Math.round(process.uptime()),
+        rssMb: Math.round(memory.rss / 1024 / 1024 * 10) / 10,
+        heapUsedMb: Math.round(memory.heapUsed / 1024 / 1024 * 10) / 10,
+        externalMb: Math.round(memory.external / 1024 / 1024 * 10) / 10
+      },
+      eventLoop: {
+        currentMs: eventLoopLagSamples[eventLoopLagSamples.length - 1] || 0,
+        averageMs: eventLoopLagSamples.length
+          ? Math.round(lagTotal / eventLoopLagSamples.length * 10) / 10
+          : 0,
+        maxMs: eventLoopLagSamples.length ? Math.max(...eventLoopLagSamples) : 0,
+        samples: eventLoopLagSamples.length
+      },
+      state: stateTotals
+    },
     logs: appLogs.slice(-120)
   }
 }
@@ -485,6 +548,26 @@ function saveNicknames(nicknames: Map<string, string>) {
   const tmp = NICKNAME_PATH + '.tmp'
   fs.writeFileSync(tmp, JSON.stringify(out, null, 2))
   fs.renameSync(tmp, NICKNAME_PATH)
+}
+
+function loadBlockNickHistory() {
+  ensureStateDir()
+  if (!fs.existsSync(BLOCK_NICK_HISTORY_PATH)) return createBlockNickHistoryState()
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(BLOCK_NICK_HISTORY_PATH, 'utf8')) as BlockNickHistoryFile
+    return createBlockNickHistoryState(parsed)
+  } catch (error) {
+    term('Config', `Could not read block-nick-history.json; starting with an empty history: ${String(error)}`, colors.yellow)
+    return createBlockNickHistoryState()
+  }
+}
+
+function saveBlockNickHistory(state: ReturnType<typeof createBlockNickHistoryState>) {
+  ensureStateDir()
+  const tmp = BLOCK_NICK_HISTORY_PATH + '.tmp'
+  fs.writeFileSync(tmp, JSON.stringify(serializeBlockNickHistory(state), null, 2))
+  fs.renameSync(tmp, BLOCK_NICK_HISTORY_PATH)
 }
 
 function flattenChatToText(comp: any): string {
@@ -2372,6 +2455,139 @@ function scoreboardModeTexts(state: SessionState): string[] {
   return Array.from(new Set(lines))
 }
 
+function bedWarsMapNameFromScoreboard(state: SessionState): string | null {
+  for (const text of scoreboardModeTexts(state)) {
+    const clean = stripColors(text).replace(/\s+/g, ' ').trim()
+    const match = /(?:^|\s)Map:\s*([A-Za-z0-9][A-Za-z0-9 _'-]{0,48})\s*$/i.exec(clean)
+    if (match) {
+      return match[1]
+        .trim()
+        .replace(/\b([A-Za-z]{2,})\s+([A-Za-z])$/, '$1$2')
+    }
+  }
+  return null
+}
+
+function currentBedWarsModeName(state: SessionState, splitState: SplitReminderState): string | null {
+  if (splitState.stableTeamMaxPlayersSource.startsWith('mode:')) {
+    return splitState.stableTeamMaxPlayersSource.slice('mode:'.length) || null
+  }
+  for (const text of scoreboardModeTexts(state)) {
+    const mode = bedWarsTeamModeFromText(text)
+    if (mode) return mode.label
+  }
+  const scoreboardMode = inferBedWarsModeFromScoreboardGroups(state)
+  if (scoreboardMode) return scoreboardMode.label
+
+  const groups = new Map<string, Set<string>>()
+  for (const player of state.knownPlayersByName.values()) {
+    const letter = bedWarsTabTeamLetterFromPlayerInfo(player)
+    const name = stripColors(String(player?.name || '')).trim()
+    if (!letter || !validPlayerName(name)) continue
+    if (!groups.has(letter)) groups.set(letter, new Set())
+    groups.get(letter)!.add(playerKey(name))
+  }
+  const sizes = Array.from(groups.values()).map(group => group.size)
+  if (groups.size >= 6) return Math.max(...sizes, 0) >= 2 ? 'Doubles' : 'Solo'
+  if (groups.size >= 3) {
+    const largest = Math.max(...sizes, 0)
+    if (largest >= 4) return '4v4v4v4'
+    if (largest >= 3) return '3v3v3v3'
+  }
+  return null
+}
+
+function blockedPlayerTeamContext(
+  state: SessionState,
+  playerName: string,
+  maxPlayers = MAX_BEDWARS_TEAM_PLAYERS
+): { team?: string; teammates: string[] } {
+  const targetKey = playerKey(playerName)
+  const players = Array.from(new Map([
+    ...state.knownPlayersByName.entries(),
+    ...state.playersByName.entries()
+  ]).values())
+  const blockedPlayer = players.find(player => playerKey(String(player?.name || '')) === targetKey)
+  const tabLetter = bedWarsTabTeamLetterFromPlayerInfo(blockedPlayer)
+  const knownTeams = new Set<TeamState>(state.teams.values())
+  for (const team of state.knownTeamByPlayerKey.values()) knownTeams.add(team)
+  for (const teams of state.knownTeamsByPlayerKey.values()) {
+    for (const team of teams.values()) knownTeams.add(team)
+  }
+
+  if (tabLetter) {
+    const colorName = BEDWARS_TAB_TEAM_LETTERS[tabLetter] || null
+    const teammates = new Set(players
+      .filter(player => {
+        return bedWarsTabTeamLetterFromPlayerInfo(player) === tabLetter
+          || (!!colorName && playerDisplayColorName(player) === colorName)
+      })
+      .map(player => stripColors(String(player?.name || '')).trim())
+      .filter(name => validPlayerName(name) && playerKey(name) !== targetKey)
+    )
+    for (const team of knownTeams) {
+      if (
+        bedWarsTabTeamLetter(team) !== tabLetter
+        && (!colorName || !teamIncludesColorName(state, team, colorName))
+      ) continue
+      for (const name of team.players) {
+        const clean = stripColors(name).trim()
+        if (validPlayerName(clean) && playerKey(clean) !== targetKey) teammates.add(clean)
+      }
+    }
+    return {
+      team: colorName || tabLetter,
+      teammates: Array.from(teammates).slice(0, Math.max(0, maxPlayers - 1))
+    }
+  }
+
+  const candidates = Array.from(new Set([
+    ...(state.knownTeamsByPlayerKey.get(targetKey)?.values() || []),
+    ...(state.knownTeamByPlayerKey.has(targetKey) ? [state.knownTeamByPlayerKey.get(targetKey)!] : []),
+    ...Array.from(state.teams.values()).filter(team => teamHasPlayer(team, playerName))
+  ])).filter(team => team.players.size <= MAX_BEDWARS_TEAM_PLAYERS)
+  candidates.sort((left, right) => {
+    const score = (team: TeamState) => (bedWarsTabTeamName(team) ? 100 : 0) + (teamColorName(team) ? 20 : 0) + team.players.size
+    return score(right) - score(left)
+  })
+  const team = candidates[0]
+  if (!team) return { teammates: [] }
+
+  const teamLetter = bedWarsTabTeamLetter(team)
+  const colorName = teamColorName(team)
+  const teammates = new Set<string>()
+  for (const candidate of knownTeams) {
+    const matches = teamLetter
+      ? bedWarsTabTeamLetter(candidate) === teamLetter
+      : !!colorName && teamIncludesColorName(state, candidate, colorName)
+    if (!matches) continue
+    for (const name of candidate.players) {
+      const clean = stripColors(name).trim()
+      if (validPlayerName(clean) && playerKey(clean) !== targetKey) teammates.add(clean)
+    }
+  }
+
+  return {
+    team: teamDisplayName(team),
+    teammates: Array.from(teammates).slice(0, Math.max(0, maxPlayers - 1))
+  }
+}
+
+function localTeammatesForBlockContext(
+  state: SessionState,
+  localPlayerName: string,
+  maxPlayers: number
+): string[] {
+  const identities = localPlayerIdentityNames(state, localPlayerName)
+  const identityKeys = new Set(identities.map(playerKey))
+  const candidates = identities
+    .map(identity => blockedPlayerTeamContext(state, identity, maxPlayers).teammates)
+    .sort((left, right) => right.length - left.length)
+  return Array.from(new Set(candidates[0] || []))
+    .filter(name => !identityKeys.has(playerKey(name)))
+    .slice(0, Math.max(0, maxPlayers - 1))
+}
+
 function isActiveBedWarsMatchScoreboardText(text: string): boolean {
   const clean = stripColors(text).replace(/\s+/g, ' ').trim()
   return /\b(?:Diamond|Emerald)\s+[IVX]+\s+in\s+\d+:\d+\b/i.test(clean)
@@ -2915,6 +3131,7 @@ function bridgePlay(
   sessionState: SessionState,
   splitReminderState: SplitReminderState
 ) {
+  const blockNickHistory = loadBlockNickHistory()
   let lastLobbyCommandKey = ''
   let lastLobbyCommandAt = 0
   let currentWindowId = -1
@@ -2925,6 +3142,7 @@ function bridgePlay(
   let lastScoreboardAnalysisAt = 0
   let scoreboardAnalysisDeferred = false
   let allowBedWarsScoreboardRecovery = true
+  let lastBedWarsMapName = ''
   let recentLocalChat: { message: string; sentAt: number } | null = null
   let lastRespawnDeathKey = ''
   let lastRespawnDeathAt = 0
@@ -2997,6 +3215,8 @@ function bridgePlay(
   }
 
   const analyzeScoreboard = (force = false) => {
+    const detectedMap = bedWarsMapNameFromScoreboard(sessionState)
+    if (detectedMap) lastBedWarsMapName = detectedMap
     if (!appConfig.splitReminder.enabled) return
     if (isTransferActive()) {
       scoreboardAnalysisDeferred = true
@@ -3136,6 +3356,7 @@ function bridgePlay(
 
   const resetForScoreboardTransition = () => {
     clearActiveRespawnTimers(false)
+    pruneSessionHistory(sessionState, { clearEntities: true })
     resetSplitReminderMatchState(splitReminderState, false)
     allowBedWarsScoreboardRecovery = true
     lastRespawnDeathKey = ''
@@ -3189,6 +3410,7 @@ function bridgePlay(
 
     try {
       if (meta.name === 'login' || meta.name === 'respawn') {
+        clearSessionEntityHistory(sessionState)
         trackLocalGameMode(data, sessionState)
         startTransferWatch()
         if (!isLiveBedWarsMatch(sessionState, splitReminderState)) {
@@ -3198,7 +3420,7 @@ function bridgePlay(
       if (meta.name === 'chat') {
         const raw = (data as any).message
         const position = (data as any).position ?? 0
-        const comp = (() => {
+        let comp = (() => {
           try {
             return JSON.parse(raw)
           } catch {
@@ -3206,6 +3428,16 @@ function bridgePlay(
           }
         })()
         const now = Date.now()
+        const blockListObservation = observeBlockListChat(blockNickHistory, comp, now)
+        comp = blockListObservation.component
+        if (blockListObservation.changed) saveBlockNickHistory(blockNickHistory)
+        if (blockListObservation.learned) {
+          term(
+            'QoL',
+            `Block list linked ${blockListObservation.learned.currentName} to previous name(s): ${blockListObservation.learned.previousNames.join(', ')}.`,
+            colors.yellow
+          )
+        }
         const detectedLocalAlias = localPlayerAliasFromNickStatus(flattenChatToText(comp), sessionState)
           || (
             recentLocalChat && now - recentLocalChat.sentAt <= 5000
@@ -3239,6 +3471,7 @@ function bridgePlay(
         )
         if (splitReminderState.bedWarsGameStartedAt !== gameStartedAtBeforeChat) {
           clearActiveRespawnTimers(false)
+          pruneSessionHistory(sessionState, { clearEntities: true })
         }
         const deathText = flattenChatToText(comp)
         const localCountdownSeconds = localRespawnCountdownSeconds(deathText)
@@ -3541,6 +3774,31 @@ function bridgePlay(
 
     if (meta.name === 'chat') {
       const message = String((data as any).message || '')
+      const blockCommand = parseBlockListCommand(message)
+      let blockContext: BlockedNameContext | undefined
+      const targetsLocalPlayer = blockCommand?.action === 'add'
+        && isLocalPlayerIdentity(sessionState, downstream.username, blockCommand.name)
+      if (blockCommand?.action === 'add' && !targetsLocalPlayer) {
+        const mode = currentBedWarsModeName(sessionState, splitReminderState)
+        const maxPlayers = mode ? bedWarsTeamMaxPlayersFromText(mode) : MAX_BEDWARS_TEAM_PLAYERS
+        const teamContext = blockedPlayerTeamContext(sessionState, blockCommand.name, maxPlayers)
+        const yourTeammates = localTeammatesForBlockContext(sessionState, downstream.username, maxPlayers)
+        blockContext = {
+          blockedAt: new Date().toISOString(),
+          teammates: teamContext.teammates,
+          yourTeammates,
+          ...(teamContext.team ? { team: teamContext.team } : {}),
+          ...(mode ? { mode } : {}),
+          ...(lastBedWarsMapName ? { map: lastBedWarsMapName } : {})
+        }
+      }
+      if (targetsLocalPlayer) {
+        if (trackBlockListCommand(blockNickHistory, `/unblock ${blockCommand.name}`)) {
+          saveBlockNickHistory(blockNickHistory)
+        }
+      } else if (trackBlockListCommand(blockNickHistory, message, blockContext)) {
+        saveBlockNickHistory(blockNickHistory)
+      }
       if (message.trim() && !message.trim().startsWith('/')) {
         recentLocalChat = { message, sentAt: Date.now() }
       }
@@ -3729,6 +3987,10 @@ export const __test = {
   reconnectedPlayerName,
   disconnectedWhileRespawningPlayerName,
   bedWarsTeamColorFromChatComponent,
+  bedWarsMapNameFromScoreboard,
+  blockedPlayerTeamContext,
+  localTeammatesForBlockContext,
+  currentBedWarsModeName,
   offlinePlayerUuid,
   isLocalTeammateDeathText,
   isLobbySelectorWindowTitle,
@@ -3866,16 +4128,20 @@ export function startProxy(): Server {
     const route = currentRoute()
     activeSessions += 1
     let countedSession = true
+    let diagnosticSessionState: SessionState | null = null
     const closeSessionCounter = () => {
       if (!countedSession) return
       countedSession = false
       activeSessions = Math.max(0, activeSessions - 1)
+      if (diagnosticSessionState) activeSessionStates.delete(diagnosticSessionState)
     }
     term('Local', `${downstream.username} is logging in from ${remoteHost}:${remotePort} using Hypixel Proxy`, colors.magenta)
     term('Routing', `${downstream.username} -> ${route.name} (${route.host}:${route.port})`, colors.cyan)
 
     const nicknames = loadNicknames()
     const sessionState = createSessionState(downstream.username, downstream.uuid)
+    diagnosticSessionState = sessionState
+    activeSessionStates.add(sessionState)
     const splitReminderState = createSplitReminderState()
     let microsoftCodeShown = false
     const upstream: Client = mc.createClient({
