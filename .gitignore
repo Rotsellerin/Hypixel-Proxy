@@ -8,6 +8,7 @@ launcher/**/bin/
 launcher/**/obj/
 app/*.pdb
 qa-screenshots/
+.release/
 private/
 *.csproj.user
 

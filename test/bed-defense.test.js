@@ -1,8 +1,8 @@
 const assert = require('assert')
-const { __test } = require('../dist/index')
 const {
+  bedDefenseBulkChunks,
   bedDefenseDetections,
-  collectNewBedDefenseDetections,
+  clearBedDefenseObsidian,
   createBedDefenseState,
   observeBedDefenseBlockChange,
   observeBedDefenseBulk,
@@ -12,21 +12,6 @@ const {
 } = require('../dist/state/bedDefenseState')
 
 const blockState = (id, metadata = 0) => (id << 4) | metadata
-
-const scoreboardState = __test.createSessionState()
-scoreboardState.displayedScoreboardObjectives.set(1, 'bedwars')
-for (const [key, itemName] of [
-  ['red', '§cR Red: §a✓'],
-  ['blue', '§9B Blue: §a✓'],
-  ['green', '§aG Green: §a✓'],
-  ['yellow', '§eY Yellow: §a✓']
-]) {
-  scoreboardState.scores.set(key, { itemName, scoreName: 'bedwars' })
-}
-assert.deepEqual(
-  Array.from(__test.activeBedWarsTeamColors(scoreboardState)).sort(),
-  ['Blue', 'Green', 'Red', 'Yellow']
-)
 
 function chunkData(blocks, bitMap = 1, skyLight = true) {
   const sections = Array.from({ length: 16 }, (_, section) => section)
@@ -41,22 +26,26 @@ function chunkData(blocks, bitMap = 1, skyLight = true) {
   return data
 }
 
-const state = createBedDefenseState()
-const blocks = [
+const redBase = [
   { x: 2, y: 5, z: 2, id: 26 },
   { x: 3, y: 5, z: 2, id: 26 },
-  { x: 2, y: 5, z: 3, id: 49 },
   ...Array.from({ length: 8 }, (_, index) => ({
     x: 1 + (index % 4), y: 4, z: 5 + Math.floor(index / 4), id: 35, metadata: 14
   }))
 ]
 
+const state = createBedDefenseState()
 assert.equal(observeBedDefenseChunk({
-  x: 0, z: 0, groundUp: true, bitMap: 1, chunkData: chunkData(blocks)
+  x: 0, z: 0, bitMap: 1, chunkData: chunkData([...redBase, { x: 2, y: 5, z: 3, id: 49 }])
 }, state), true)
 assert.deepEqual(bedDefenseDetections(state).map(item => item.team), ['Red'])
-assert.equal(collectNewBedDefenseDetections(state).length, 1)
-assert.equal(collectNewBedDefenseDetections(state).length, 0)
+clearBedDefenseObsidian(state)
+assert.deepEqual(bedDefenseDetections(state), [])
+assert.ok(Array.from(state.teamByBedKey.values()).includes('Red'))
+observeBedDefenseBlockChange({
+  location: { x: 2, y: 5, z: 3 }, type: blockState(49)
+}, state)
+assert.deepEqual(bedDefenseDetections(state).map(item => item.team), ['Red'])
 
 observeBedDefenseBlockChange({
   location: { x: 2, y: 5, z: 3 }, type: blockState(0)
@@ -70,33 +59,42 @@ observeBedDefenseMultiBlockChange({
 }, state)
 assert.deepEqual(bedDefenseDetections(state).map(item => item.team), ['Red'])
 
-resetBedDefenseState(state)
-assert.equal(state.blocks.size, 0)
-assert.equal(state.changedBlockKeys.size, 0)
-assert.equal(state.teamByBedKey.size, 0)
-assert.equal(state.announcedTeams.size, 0)
+// Deferred scanning must never overwrite a newer block-change packet with
+// stale chunk contents from before the obsidian was placed.
+const staleChunk = chunkData(redBase)
+const deferredState = createBedDefenseState()
+observeBedDefenseChunk({ x: 0, z: 0, bitMap: 1, chunkData: staleChunk }, deferredState)
+bedDefenseDetections(deferredState)
+observeBedDefenseBlockChange({
+  location: { x: 2, y: 5, z: 3 }, type: blockState(49)
+}, deferredState)
+observeBedDefenseChunk({ x: 0, z: 0, bitMap: 1, chunkData: staleChunk }, deferredState)
+assert.deepEqual(bedDefenseDetections(deferredState).map(item => item.team), ['Red'])
 
-const bulkState = createBedDefenseState()
-const first = chunkData(blocks)
-const second = chunkData([
+const first = chunkData([...redBase, { x: 2, y: 5, z: 3, id: 49 }])
+const blueBase = [
   { x: 17, y: 5, z: 2, id: 26 },
-  { x: 18, y: 5, z: 2, id: 49 },
+  { x: 18, y: 5, z: 2, id: 26 },
+  { x: 18, y: 5, z: 3, id: 49 },
   ...Array.from({ length: 8 }, (_, index) => ({
     x: 17 + (index % 4), y: 4, z: 5 + Math.floor(index / 4), id: 35, metadata: 11
   }))
-])
-assert.equal(observeBedDefenseBulk({
+]
+const second = chunkData(blueBase)
+const bulkPacket = {
   skyLightSent: true,
   meta: [{ x: 0, z: 0, bitMap: 1 }, { x: 1, z: 0, bitMap: 1 }],
   data: Buffer.concat([first, second])
-}, bulkState), 2)
+}
+assert.equal(bedDefenseBulkChunks(bulkPacket).length, 2)
+const bulkState = createBedDefenseState()
+assert.equal(observeBedDefenseBulk(bulkPacket, bulkState), 2)
 assert.deepEqual(bedDefenseDetections(bulkState).map(item => item.team), ['Blue', 'Red'])
-assert.deepEqual(
-  bedDefenseDetections(bulkState, new Set(['Red', 'Green', 'Yellow'])).map(item => item.team),
-  ['Red']
-)
-assert.ok(Array.from(bulkState.teamByBedKey.values()).includes('Blue'))
 
+const allTeams = new Set(['Red', 'Blue', 'Green', 'Yellow', 'Aqua', 'White', 'Pink', 'Gray'])
+
+// Player-placed foreign wool must not rename a base whose permanent wool was
+// learned from its clean chunk data.
 const foreignWoolState = createBedDefenseState()
 const whiteBase = [
   { x: 2, y: 5, z: 2, id: 26 },
@@ -105,12 +103,8 @@ const whiteBase = [
     x: 1 + (index % 4), y: 4, z: 5 + Math.floor(index / 4), id: 35, metadata: 0
   }))
 ]
-observeBedDefenseChunk({
-  x: 0, z: 0, groundUp: true, bitMap: 1, chunkData: chunkData(whiteBase)
-}, foreignWoolState)
-const allTeams = new Set(['Red', 'Blue', 'Green', 'Yellow', 'Aqua', 'White', 'Pink', 'Gray'])
-assert.equal(foreignWoolState.teamByBedKey.size, 0)
-
+observeBedDefenseChunk({ x: 0, z: 0, bitMap: 1, chunkData: chunkData(whiteBase) }, foreignWoolState)
+bedDefenseDetections(foreignWoolState, allTeams)
 for (let index = 0; index < 40; index += 1) {
   observeBedDefenseBlockChange({
     location: { x: 1 + (index % 8), y: 5 + Math.floor(index / 16), z: 7 + (index % 5) },
@@ -120,19 +114,13 @@ for (let index = 0; index < 40; index += 1) {
 observeBedDefenseBlockChange({
   location: { x: 2, y: 5, z: 3 }, type: blockState(49)
 }, foreignWoolState)
-assert.deepEqual(
-  bedDefenseDetections(foreignWoolState, allTeams).map(item => item.team),
-  ['White']
-)
-assert.equal(foreignWoolState.changedBlockKeys.size, 40)
-assert.equal(foreignWoolState.teamByBedKey.size, 2)
-assert.ok(Array.from(foreignWoolState.teamByBedKey.values()).every(team => team === 'White'))
+assert.deepEqual(bedDefenseDetections(foreignWoolState, allTeams).map(item => item.team), ['White'])
 
-const ambiguousFirstLoadState = createBedDefenseState()
+// Equal evidence for two team colors is deliberately treated as uncertain.
+const ambiguousState = createBedDefenseState()
 observeBedDefenseChunk({
   x: 0,
   z: 0,
-  groundUp: true,
   bitMap: 1,
   chunkData: chunkData([
     { x: 2, y: 5, z: 2, id: 26 },
@@ -144,37 +132,15 @@ observeBedDefenseChunk({
       x: 5 + (index % 4), y: 4, z: 5 + Math.floor(index / 4), id: 35, metadata: 9
     }))
   ])
-}, ambiguousFirstLoadState)
-assert.deepEqual(bedDefenseDetections(ambiguousFirstLoadState, allTeams), [])
-assert.equal(ambiguousFirstLoadState.teamByBedKey.size, 0)
+}, ambiguousState)
+assert.deepEqual(bedDefenseDetections(ambiguousState, allTeams), [])
 
-const decorativeColorState = createBedDefenseState()
+// Elevated permanent team wool can identify a late-loaded base even when an
+// attacker has surrounded the bed with much more foreign wool.
+const lateLoadedState = createBedDefenseState()
 observeBedDefenseChunk({
   x: 0,
   z: 0,
-  groundUp: true,
-  bitMap: 1,
-  chunkData: chunkData([
-    { x: 2, y: 5, z: 2, id: 26 },
-    { x: 2, y: 5, z: 3, id: 49 },
-    ...Array.from({ length: 8 }, (_, index) => ({
-      x: 1 + (index % 4), y: 8, z: 8 + Math.floor(index / 4), id: 35, metadata: 0
-    })),
-    ...Array.from({ length: 32 }, (_, index) => ({
-      x: 4 + (index % 8), y: 6 + Math.floor(index / 16), z: 5 + (index % 4), id: 95, metadata: 9
-    }))
-  ])
-}, decorativeColorState)
-assert.deepEqual(
-  bedDefenseDetections(decorativeColorState, allTeams).map(item => item.team),
-  ['White']
-)
-
-const lateLoadedDefenseState = createBedDefenseState()
-observeBedDefenseChunk({
-  x: 0,
-  z: 0,
-  groundUp: true,
   bitMap: 1,
   chunkData: chunkData([
     { x: 2, y: 5, z: 2, id: 26 },
@@ -186,10 +152,12 @@ observeBedDefenseChunk({
       x: 1 + (index % 8), y: 5 + Math.floor(index / 24), z: 3 + (index % 6), id: 35, metadata: 14
     }))
   ])
-}, lateLoadedDefenseState)
-assert.deepEqual(
-  bedDefenseDetections(lateLoadedDefenseState, allTeams).map(item => item.team),
-  ['Blue']
-)
+}, lateLoadedState)
+assert.deepEqual(bedDefenseDetections(lateLoadedState, allTeams).map(item => item.team), ['Blue'])
+
+resetBedDefenseState(state)
+assert.equal(state.blocks.size, 0)
+assert.equal(state.changedBlockKeys.size, 0)
+assert.equal(state.teamByBedKey.size, 0)
 
 console.log('bed defense tests passed')

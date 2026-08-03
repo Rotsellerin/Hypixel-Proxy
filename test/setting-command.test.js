@@ -56,6 +56,7 @@ assert.equal(disabledTimer.config.bedWars.respawnTimerEnabled, false)
 assert.equal(initial.bedWars.respawnTimerEnabled, true)
 assert.equal(initial.qol.blockHitSoundEnabled, true)
 assert.equal(initial.bedWars.obsidianDetectorEnabled, true)
+assert.equal(initial.bedWars.obsidianDetectorMode, 'both')
 
 const enabledTimer = __test.changeLocalSetting(
   disabledTimer.config,

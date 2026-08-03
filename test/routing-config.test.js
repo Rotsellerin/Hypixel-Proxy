@@ -30,6 +30,7 @@ const normalized = normalizeAppConfig({
 assert.equal(normalized.routeId, 'stopthelag')
 assert.equal(normalized.bedWars.respawnTimerEnabled, true)
 assert.equal(normalized.bedWars.obsidianDetectorEnabled, true)
+assert.equal(normalized.bedWars.obsidianDetectorMode, 'both')
 assert.equal(normalized.qol.blockHitSoundEnabled, true)
 assert.equal(normalized.qol.blockHitSoundVolume, 50)
 assert.equal(normalized.splitReminder.enabled, false)
@@ -47,6 +48,9 @@ assert.equal(normalizeAppConfig({
     obsidianDetectorEnabled: false
   }
 }).bedWars.obsidianDetectorEnabled, false)
+assert.equal(normalizeAppConfig({ bedWars: { obsidianDetectorMode: 'held' } }).bedWars.obsidianDetectorMode, 'held')
+assert.equal(normalizeAppConfig({ bedWars: { obsidianDetectorMode: 'base' } }).bedWars.obsidianDetectorMode, 'base')
+assert.equal(normalizeAppConfig({ bedWars: { obsidianDetectorMode: 'invalid' } }).bedWars.obsidianDetectorMode, 'both')
 assert.equal(normalizeAppConfig({
   qol: {
     blockHitSoundEnabled: false,

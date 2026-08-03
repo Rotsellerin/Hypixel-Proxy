@@ -4,6 +4,9 @@ using System.Buffers.Binary;
 using System.Drawing.Drawing2D;
 using System.Media;
 using System.Net.Http.Json;
+using System.IO.Compression;
+using System.Reflection;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -33,8 +36,11 @@ public sealed class MainForm : Form
     private const int MaxContentWidth = 1180;
     private const int MaxContentHeight = 820;
     private const int MissedStatusPollsBeforeStopped = 80;
+    private const string UpdateRepository = "Rotsellerin/Hypixel-Proxy";
+    private const string UpdateAssetName = "Hypixel-Proxy-Windows.zip";
 
     private readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(2) };
+    private readonly HttpClient updateHttp = new() { Timeout = TimeSpan.FromMinutes(3) };
     private readonly System.Windows.Forms.Timer refreshTimer = new() { Interval = 500 };
     private readonly System.Windows.Forms.Timer splitSoundTimer = new() { Interval = 250 };
     private readonly System.Windows.Forms.Timer blockHitSoundTimer = new() { Interval = 50 };
@@ -65,6 +71,8 @@ public sealed class MainForm : Form
     private bool closingConfirmed;
     private bool logsExpanded;
     private bool qolDrawerOpen;
+    private bool updateCheckInFlight;
+    private ReleaseInfo? availableUpdate;
     private long? lastSplitSoundEventId;
     private long? lastBlockHitSoundEventId;
     private bool splitSoundLogInitialized;
@@ -97,6 +105,7 @@ public sealed class MainForm : Form
     private readonly ModernButton stopButton = ModernButton.Primary("Stop", Danger);
     private readonly ModernButton restartButton = ModernButton.Secondary("Restart");
     private readonly ModernButton qolMenuButton = ModernButton.Secondary("QoL");
+    private readonly ModernButton updateButton = ModernButton.Secondary("Check updates");
     private readonly ModernButton closeQolButton = ModernButton.Ghost("Close");
     private readonly ModernButton expandLogsButton = ModernButton.Secondary("Expand");
     private readonly ToggleSwitch splitToggle = new();
@@ -124,6 +133,9 @@ public sealed class MainForm : Form
         blockHitSoundWave = LoadBlockHitSoundWave();
         splitSoundVolume = LoadSplitSoundVolume(rootDir);
         blockHitSoundVolume = LoadBlockHitSoundVolume(rootDir);
+        updateHttp.DefaultRequestHeaders.UserAgent.ParseAdd("Hypixel-Proxy-Launcher/1.1");
+        updateHttp.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
+        updateHttp.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
 
         Text = "Hypixel Proxy";
         if (WindowIcon is not null) Icon = WindowIcon;
@@ -147,6 +159,7 @@ public sealed class MainForm : Form
             await RefreshStatusAsync();
             await RefreshSplitSoundAsync();
             await RefreshBlockHitSoundAsync();
+            await CheckForUpdatesAsync(false);
         };
         FormClosing += async (_, e) =>
         {
@@ -228,7 +241,7 @@ public sealed class MainForm : Form
     {
         var top = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = new Padding(0, 0, 0, 24) };
         top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 270));
+        top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 410));
 
         top.BackColor = AppBg;
 
@@ -258,15 +271,16 @@ public sealed class MainForm : Form
         }, 0, 0);
         copy.Controls.Add(new Label
         {
-            Text = "Local Minecraft proxy launcher",
+            Text = $"Local Minecraft proxy launcher  |  v{CurrentVersionText}",
             Dock = DockStyle.Fill,
             Font = new Font("Segoe UI", 9.5f),
             ForeColor = TextMuted,
             TextAlign = ContentAlignment.TopLeft
         }, 0, 1);
 
-        var actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, BackColor = AppBg };
+        var actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, BackColor = AppBg };
         actions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96));
+        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 170));
         actions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 132));
         actions.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         actions.Margin = new Padding(0, 10, 0, 10);
@@ -275,10 +289,18 @@ public sealed class MainForm : Form
         qolMenuButton.Click += (_, _) => SetQolDrawerVisible(!qolDrawerOpen);
         actions.Controls.Add(qolMenuButton, 0, 0);
 
+        updateButton.Margin = new Padding(0, 9, 12, 9);
+        updateButton.Click += async (_, _) =>
+        {
+            if (availableUpdate is null) await CheckForUpdatesAsync(true);
+            else await InstallAvailableUpdateAsync();
+        };
+        actions.Controls.Add(updateButton, 1, 0);
+
         statusBadge.Dock = DockStyle.Fill;
         statusBadge.Margin = new Padding(0, 9, 0, 9);
         statusBadge.Width = 132;
-        actions.Controls.Add(statusBadge, 1, 0);
+        actions.Controls.Add(statusBadge, 2, 0);
         top.Controls.Add(actions, 1, 0);
         return top;
     }
@@ -1140,6 +1162,216 @@ public sealed class MainForm : Form
         }
     }
 
+    private static string CurrentVersionText
+    {
+        get
+        {
+            var version = Assembly.GetExecutingAssembly().GetName().Version ?? new Version(1, 0, 0);
+            return $"{version.Major}.{version.Minor}.{Math.Max(0, version.Build)}";
+        }
+    }
+
+    private static Version? ParseReleaseVersion(string? tag)
+    {
+        var value = (tag ?? string.Empty).Trim().TrimStart('v', 'V');
+        var separator = value.IndexOfAny(['-', '+']);
+        if (separator >= 0) value = value[..separator];
+        return Version.TryParse(value, out var version) ? version : null;
+    }
+
+    private static Version CurrentVersion => ParseReleaseVersion(CurrentVersionText) ?? new Version(1, 0, 0);
+
+    private async Task CheckForUpdatesAsync(bool showResult)
+    {
+        if (updateCheckInFlight) return;
+        updateCheckInFlight = true;
+        updateButton.Enabled = false;
+        updateButton.Text = "Checking...";
+
+        try
+        {
+            using var response = await updateHttp.GetAsync($"https://api.github.com/repos/{UpdateRepository}/releases/latest");
+            if (!response.IsSuccessStatusCode)
+            {
+                availableUpdate = null;
+                updateButton.Text = "Check updates";
+                if (showResult)
+                {
+                    MessageBox.Show(
+                        "No published release is available yet.",
+                        "Hypixel Proxy update",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                }
+                return;
+            }
+
+            var release = await response.Content.ReadFromJsonAsync<GitHubRelease>();
+            var releaseVersion = ParseReleaseVersion(release?.TagName);
+            var asset = release?.Assets.FirstOrDefault(item =>
+                item.Name.Equals(UpdateAssetName, StringComparison.OrdinalIgnoreCase));
+
+            if (releaseVersion is not null && releaseVersion > CurrentVersion && asset is not null
+                && Uri.TryCreate(asset.BrowserDownloadUrl, UriKind.Absolute, out var downloadUrl))
+            {
+                availableUpdate = new ReleaseInfo(
+                    release!.TagName,
+                    releaseVersion,
+                    downloadUrl,
+                    asset.Digest,
+                    release.HtmlUrl);
+                updateButton.Text = "Update available";
+                return;
+            }
+
+            availableUpdate = null;
+            updateButton.Text = "Up to date";
+            if (showResult)
+            {
+                var message = releaseVersion is not null && releaseVersion > CurrentVersion && asset is null
+                    ? $"Release {release?.TagName} is missing {UpdateAssetName}."
+                    : $"You already have the latest version ({CurrentVersionText}).";
+                MessageBox.Show(message, "Hypixel Proxy update", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+        }
+        catch (Exception error)
+        {
+            availableUpdate = null;
+            updateButton.Text = "Check updates";
+            if (showResult)
+            {
+                MessageBox.Show(
+                    $"Could not check GitHub for updates.\n\n{error.Message}",
+                    "Hypixel Proxy update",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
+        }
+        finally
+        {
+            updateCheckInFlight = false;
+            updateButton.Enabled = true;
+        }
+    }
+
+    private async Task InstallAvailableUpdateAsync()
+    {
+        var release = availableUpdate;
+        if (release is null) return;
+
+        if (lastStatus is not null)
+        {
+            var stop = MessageBox.Show(
+                "The proxy must stop while the update is installed. Stop it and continue?",
+                $"Install {release.TagName}",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+            if (stop != DialogResult.Yes) return;
+            await StopProxyAsync();
+        }
+
+        var install = MessageBox.Show(
+            $"Install {release.TagName} now? Local settings and Microsoft sign-in data will be kept.",
+            "Hypixel Proxy update",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Question);
+        if (install != DialogResult.Yes) return;
+
+        updateButton.Enabled = false;
+        updateButton.Text = "Downloading...";
+        var updateDirectory = Path.Combine(Path.GetTempPath(), $"HypixelProxyUpdate-{Guid.NewGuid():N}");
+
+        try
+        {
+            Directory.CreateDirectory(updateDirectory);
+            var zipPath = Path.Combine(updateDirectory, UpdateAssetName);
+            await using (var source = await updateHttp.GetStreamAsync(release.DownloadUrl))
+            await using (var destination = File.Create(zipPath))
+            {
+                await source.CopyToAsync(destination);
+            }
+
+            VerifyReleaseDigest(zipPath, release.Digest);
+            updateButton.Text = "Preparing...";
+            var extractedDirectory = Path.Combine(updateDirectory, "payload");
+            ZipFile.ExtractToDirectory(zipPath, extractedDirectory);
+            var payloadRoot = FindUpdatePayloadRoot(extractedDirectory)
+                ?? throw new InvalidDataException("The update package does not contain package.json and app/Hypixel Proxy.exe.");
+
+            var updaterSource = Path.Combine(rootDir, "update.ps1");
+            if (!File.Exists(updaterSource)) throw new FileNotFoundException("Could not find update.ps1.", updaterSource);
+            var updaterCopy = Path.Combine(updateDirectory, "update.ps1");
+            File.Copy(updaterSource, updaterCopy, true);
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                WorkingDirectory = updateDirectory,
+                WindowStyle = ProcessWindowStyle.Hidden,
+                CreateNoWindow = true,
+                UseShellExecute = false
+            };
+            startInfo.ArgumentList.Add("-NoProfile");
+            startInfo.ArgumentList.Add("-ExecutionPolicy");
+            startInfo.ArgumentList.Add("Bypass");
+            startInfo.ArgumentList.Add("-File");
+            startInfo.ArgumentList.Add(updaterCopy);
+            startInfo.ArgumentList.Add("-LauncherPid");
+            startInfo.ArgumentList.Add(Environment.ProcessId.ToString());
+            startInfo.ArgumentList.Add("-RootDir");
+            startInfo.ArgumentList.Add(rootDir);
+            startInfo.ArgumentList.Add("-PayloadDir");
+            startInfo.ArgumentList.Add(payloadRoot);
+            startInfo.ArgumentList.Add("-Version");
+            startInfo.ArgumentList.Add(release.TagName);
+            Process.Start(startInfo);
+
+            refreshTimer.Stop();
+            splitSoundTimer.Stop();
+            blockHitSoundTimer.Stop();
+            closingConfirmed = true;
+            BeginInvoke(Close);
+        }
+        catch (Exception error)
+        {
+            updateButton.Enabled = true;
+            updateButton.Text = "Update available";
+            MessageBox.Show(
+                $"The update could not be prepared. Nothing was replaced.\n\n{error.Message}",
+                "Hypixel Proxy update",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+    }
+
+    private static void VerifyReleaseDigest(string zipPath, string? digest)
+    {
+        if (string.IsNullOrWhiteSpace(digest)) return;
+        var parts = digest.Split(':', 2);
+        if (parts.Length != 2 || !parts[0].Equals("sha256", StringComparison.OrdinalIgnoreCase)) return;
+        using var stream = File.OpenRead(zipPath);
+        var actual = Convert.ToHexString(SHA256.HashData(stream));
+        if (!actual.Equals(parts[1], StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException("The downloaded update failed its SHA-256 verification.");
+        }
+    }
+
+    private static string? FindUpdatePayloadRoot(string extractedDirectory)
+    {
+        var candidates = new[] { extractedDirectory }
+            .Concat(Directory.EnumerateDirectories(extractedDirectory, "*", SearchOption.AllDirectories));
+        foreach (var candidate in candidates)
+        {
+            if (File.Exists(Path.Combine(candidate, "package.json"))
+                && File.Exists(Path.Combine(candidate, "app", "Hypixel Proxy.exe")))
+            {
+                return Path.GetFullPath(candidate);
+            }
+        }
+        return null;
+    }
+
     private async Task StartProxyAsync()
     {
         if (await TryGetStatusAsync() is not null)
@@ -1527,6 +1759,37 @@ public sealed class MainForm : Form
     {
         public int SplitSoundVolume { get; set; } = 100;
         public int BlockHitSoundVolume { get; set; } = 50;
+    }
+
+    private sealed record ReleaseInfo(
+        string TagName,
+        Version Version,
+        Uri DownloadUrl,
+        string? Digest,
+        string? HtmlUrl);
+
+    private sealed class GitHubRelease
+    {
+        [JsonPropertyName("tag_name")]
+        public string TagName { get; set; } = string.Empty;
+
+        [JsonPropertyName("html_url")]
+        public string? HtmlUrl { get; set; }
+
+        [JsonPropertyName("assets")]
+        public List<GitHubReleaseAsset> Assets { get; set; } = [];
+    }
+
+    private sealed class GitHubReleaseAsset
+    {
+        [JsonPropertyName("name")]
+        public string Name { get; set; } = string.Empty;
+
+        [JsonPropertyName("browser_download_url")]
+        public string BrowserDownloadUrl { get; set; } = string.Empty;
+
+        [JsonPropertyName("digest")]
+        public string? Digest { get; set; }
     }
 
     private sealed class ProxyStatus

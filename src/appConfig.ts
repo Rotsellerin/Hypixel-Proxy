@@ -2,6 +2,7 @@ import fs from 'fs'
 import path from 'path'
 
 export type RouteId = 'direct' | 'stopthelag' | 'hypixelfast'
+export type ObsidianDetectorMode = 'held' | 'base' | 'both'
 
 export type UpstreamRoute = {
   id: RouteId
@@ -22,6 +23,7 @@ export type SplitReminderSettings = {
 export type BedWarsSettings = {
   respawnTimerEnabled: boolean
   obsidianDetectorEnabled: boolean
+  obsidianDetectorMode: ObsidianDetectorMode
 }
 
 export type QolSettings = {
@@ -96,7 +98,8 @@ export function defaultAppConfig(): AppConfig {
     routeId: 'direct',
     bedWars: {
       respawnTimerEnabled: true,
-      obsidianDetectorEnabled: true
+      obsidianDetectorEnabled: true,
+      obsidianDetectorMode: 'both'
     },
     qol: {
       blockHitSoundEnabled: true,
@@ -170,7 +173,10 @@ export function normalizeAppConfig(value: unknown): AppConfig {
         : true,
       obsidianDetectorEnabled: typeof rawBedWars.obsidianDetectorEnabled === 'boolean'
         ? rawBedWars.obsidianDetectorEnabled
-        : true
+        : true,
+      obsidianDetectorMode: rawBedWars.obsidianDetectorMode === 'held' || rawBedWars.obsidianDetectorMode === 'base'
+        ? rawBedWars.obsidianDetectorMode
+        : 'both'
     },
     qol: {
       blockHitSoundEnabled: typeof rawQol.blockHitSoundEnabled === 'boolean'

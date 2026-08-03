@@ -27,13 +27,21 @@ import {
   trackSwordBlock
 } from './state/blockHitSoundState'
 import {
-  BedDefenseDetection,
   BedWarsTeamColor,
+  ObsidianHolderDetection,
+  createObsidianDetectorState,
+  equipmentPacketHoldsObsidian,
+  obsidianHolderDetections,
+  rememberObsidianHolder,
+  resetObsidianDetectorState
+} from './state/obsidianDetectorState'
+import {
+  BedDefenseChunkPacket,
+  bedDefenseBulkChunks,
   bedDefenseDetections,
-  collectNewBedDefenseDetections,
+  clearBedDefenseObsidian,
   createBedDefenseState,
   observeBedDefenseBlockChange,
-  observeBedDefenseBulk,
   observeBedDefenseChunk,
   observeBedDefenseMultiBlockChange,
   resetBedDefenseState
@@ -2554,7 +2562,7 @@ function scoreboardModeTexts(state: SessionState): string[] {
 
 function activeBedWarsTeamColors(state: SessionState): Set<BedWarsTeamColor> {
   const teams = new Set<BedWarsTeamColor>()
-  const teamPattern = /\b(Red|Blue|Green|Yellow|Aqua|White|Pink|Gray):/gi
+  const teamPattern = /\b(Red|Blue|Green|Yellow|Aqua|White|Pink|Gray):\s*(?:\u2713|\u2714)/gi
   for (const text of scoreboardModeTexts(state)) {
     const clean = stripColors(text).replace(/\s+/g, ' ')
     for (const match of clean.matchAll(teamPattern)) {
@@ -2563,6 +2571,34 @@ function activeBedWarsTeamColors(state: SessionState): Set<BedWarsTeamColor> {
     }
   }
   return teams
+}
+
+function isBedDefenseScoreboardContext(state: SessionState): boolean {
+  return scoreboardModeTexts(state).some(text => (
+    isBedWarsPregameCountdown(text) || isActiveBedWarsMatchScoreboardText(text)
+  ))
+}
+
+function obsidianHoldersFromSession(
+  state: SessionState,
+  activeTeams: ReadonlySet<BedWarsTeamColor>
+): ObsidianHolderDetection[] {
+  const detections: ObsidianHolderDetection[] = []
+  for (const entity of state.playerEntitiesByUuid.values()) {
+    if (!equipmentPacketHoldsObsidian(entity.equipment.get(0))) continue
+    const playerKeyValue = state.playerNameByUuid.get(entity.uuid) || ''
+    const profile = state.knownPlayersByName.get(playerKeyValue)
+    const playerName = typeof profile?.name === 'string' ? profile.name : playerKeyValue
+    if (!validPlayerName(playerName)) continue
+    const teamCandidates = Array.from(state.knownTeamsByPlayerKey.get(playerKeyValue)?.values() || [])
+    const primaryTeam = state.knownTeamByPlayerKey.get(playerKeyValue)
+    if (primaryTeam) teamCandidates.unshift(primaryTeam)
+    const team = teamCandidates
+      .map(candidate => teamColorName(candidate))
+      .find((color): color is BedWarsTeamColor => Boolean(color && activeTeams.has(color as BedWarsTeamColor)))
+    if (team) detections.push({ team, playerName, source: 'held' })
+  }
+  return detections
 }
 
 function bedWarsMapNameFromScoreboard(state: SessionState): string | null {
@@ -3243,7 +3279,13 @@ function bridgePlay(
 ) {
   const blockNickHistory = loadBlockNickHistory()
   const blockHitSound = createBlockHitSoundState()
+  const obsidianDetector = createObsidianDetectorState()
   const bedDefense = createBedDefenseState()
+  const pendingHeldItemsByEntityId = new Map<number, any>()
+  const pendingBedDefenseChunks = new Map<string, BedDefenseChunkPacket>()
+  let bedDefenseScanScheduled = false
+  let bedDefenseChunkScanningArmed = false
+  let bridgeClosed = false
   let lastLobbyCommandKey = ''
   let lastLobbyCommandAt = 0
   let currentWindowId = -1
@@ -3254,8 +3296,6 @@ function bridgePlay(
   let lastScoreboardAnalysisAt = 0
   let scoreboardAnalysisDeferred = false
   let allowBedWarsScoreboardRecovery = true
-  let bedDefensePregameActive = false
-  let lastPregameSnapshotLogSignature = ''
   let lastBedWarsMapName = ''
   let recentLocalChat: { message: string; sentAt: number } | null = null
   let lastRespawnDeathKey = ''
@@ -3328,27 +3368,46 @@ function bridgePlay(
     return transferWatch.active
   }
 
-  const learnPregameBedDefenseTeams = () => {
-    if (!bedDefensePregameActive || !appConfig.bedWars.obsidianDetectorEnabled) return
-    bedDefenseDetections(bedDefense)
+  const heldObsidianDetectorEnabled = () => appConfig.bedWars.obsidianDetectorMode !== 'base'
+  const baseObsidianDetectorEnabled = () => appConfig.bedWars.obsidianDetectorMode !== 'held'
+
+  const queueBedDefenseChunks = (packets: BedDefenseChunkPacket[]) => {
+    if (
+      !appConfig.bedWars.obsidianDetectorEnabled
+      || !baseObsidianDetectorEnabled()
+      || !bedDefenseChunkScanningArmed
+      || bridgeClosed
+    ) return
+    for (const packet of packets) pendingBedDefenseChunks.set(`${packet.x},${packet.z}`, packet)
+    if (bedDefenseScanScheduled || !pendingBedDefenseChunks.size) return
+    bedDefenseScanScheduled = true
+    setImmediate(scanNextBedDefenseChunk)
   }
 
-  const logPregameBedDefenseSnapshot = () => {
-    const bedBlocks = bedDefense.teamByBedKey.size
-    const bases = new Set(bedDefense.teamByBedKey.values()).size
-    const signature = `${bases}:${bedBlocks}`
-    if (!bedBlocks || signature === lastPregameSnapshotLogSignature) return
-    lastPregameSnapshotLogSignature = signature
-    term('QoL', `Pregame snapshot captured ${bases} base(s) (${bedBlocks} bed blocks).`, colors.magenta)
+  const scanNextBedDefenseChunk = () => {
+    bedDefenseScanScheduled = false
+    if (bridgeClosed || !bedDefenseChunkScanningArmed) {
+      pendingBedDefenseChunks.clear()
+      return
+    }
+    const next = pendingBedDefenseChunks.entries().next()
+    if (next.done) return
+    const [key, packet] = next.value
+    pendingBedDefenseChunks.delete(key)
+    observeBedDefenseChunk(packet, bedDefense)
+    // Learn clean base ownership even during pregame, before player wool is placed.
+    bedDefenseDetections(bedDefense)
+    announceBaseObsidianDetections()
+    if (pendingBedDefenseChunks.size) {
+      bedDefenseScanScheduled = true
+      setImmediate(scanNextBedDefenseChunk)
+    }
   }
 
   const analyzeScoreboard = (force = false) => {
     const detectedMap = bedWarsMapNameFromScoreboard(sessionState)
     if (detectedMap) lastBedWarsMapName = detectedMap
-    if (scoreboardModeTexts(sessionState).some(isBedWarsPregameCountdown)) {
-      bedDefensePregameActive = true
-      learnPregameBedDefenseTeams()
-    }
+    if (isBedDefenseScoreboardContext(sessionState)) bedDefenseChunkScanningArmed = true
     if (!appConfig.splitReminder.enabled) return
     if (isTransferActive()) {
       scoreboardAnalysisDeferred = true
@@ -3386,7 +3445,7 @@ function bridgePlay(
   const testThisSessionBlockHitSound = () => announceBlockHitSound(true)
   activeBlockHitSoundTests.add(testThisSessionBlockHitSound)
 
-  const bedDefenseTeamColor: Record<string, string> = {
+  const obsidianTeamColor: Record<string, string> = {
     Red: 'red',
     Blue: 'blue',
     Green: 'green',
@@ -3397,25 +3456,57 @@ function bridgePlay(
     Gray: 'gray'
   }
 
-  const bedDefenseChat = (detection: BedDefenseDetection) => ({
+  const obsidianDetectionChat = (detection: ObsidianHolderDetection) => ({
     text: '',
     extra: [
       { text: '[Obsidian] ', color: 'dark_purple', bold: true },
-      { text: detection.team, color: bedDefenseTeamColor[detection.team] || 'white', bold: true },
-      { text: ' team has obsidian at their bed.', color: 'yellow' }
+      { text: detection.team, color: obsidianTeamColor[detection.team] || 'white', bold: true },
+      { text: ' team has obsidian', color: 'yellow' },
+      {
+        text: detection.source === 'held'
+          ? ` (held by ${detection.playerName}).`
+          : ' (detected at their bed).',
+        color: 'gray'
+      }
     ]
   })
 
-  const announceNewBedDefenseDetections = () => {
+  const announceObsidianHolders = () => {
     if (!appConfig.bedWars.obsidianDetectorEnabled) return
+    if (!heldObsidianDetectorEnabled()) return
     if (!isLiveBedWarsMatch(sessionState, splitReminderState)) return
     const activeTeams = activeBedWarsTeamColors(sessionState)
     if (!activeTeams.size) return
-    for (const detection of collectNewBedDefenseDetections(bedDefense, activeTeams)) {
-      sendClientChat(downstream, bedDefenseChat(detection))
+    for (const detection of obsidianHoldersFromSession(sessionState, activeTeams)) {
+      const { team, playerName } = detection
+      if (!rememberObsidianHolder(obsidianDetector, detection)) continue
+      sendClientChat(downstream, obsidianDetectionChat(detection))
       splitSoundEventId += 1
-      term('QoL', `Obsidian detected at ${detection.team} bed.`, colors.magenta)
+      term('QoL', `${playerName} on ${team} was seen holding obsidian.`, colors.magenta)
     }
+  }
+
+  const announceBaseObsidianDetections = () => {
+    if (!appConfig.bedWars.obsidianDetectorEnabled || !baseObsidianDetectorEnabled()) return
+    if (!isLiveBedWarsMatch(sessionState, splitReminderState)) return
+    const activeTeams = activeBedWarsTeamColors(sessionState)
+    if (!activeTeams.size) return
+    for (const base of bedDefenseDetections(bedDefense, activeTeams)) {
+      const detection: ObsidianHolderDetection = {
+        team: base.team,
+        playerName: 'Base detector',
+        source: 'base'
+      }
+      if (!rememberObsidianHolder(obsidianDetector, detection)) continue
+      sendClientChat(downstream, obsidianDetectionChat(detection))
+      splitSoundEventId += 1
+      term('QoL', `Obsidian detected at ${base.team} bed.`, colors.magenta)
+    }
+  }
+
+  const announceAllObsidianDetections = () => {
+    announceObsidianHolders()
+    announceBaseObsidianDetections()
   }
 
   const recoverBedWarsStateFromScoreboard = () => {
@@ -3429,6 +3520,12 @@ function bridgePlay(
   const analyzeTeamAfterGameStart = (previousGameStartedAt: number) => {
     if (!splitReminderState.bedWarsGameActive) return
     if (splitReminderState.bedWarsGameStartedAt === previousGameStartedAt) return
+
+    // Pregame chunks are useful for learning which permanent wool belongs to
+    // each base, but any obsidian present in that snapshot is map data rather
+    // than a player-placed defense. Only live-match updates may count.
+    clearBedDefenseObsidian(bedDefense)
+    pendingBedDefenseChunks.clear()
 
     // The transfer guard should not hide the new match roster for 20 seconds.
     transferWatch.active = false
@@ -3541,7 +3638,9 @@ function bridgePlay(
 
   const resetForScoreboardTransition = () => {
     clearActiveRespawnTimers(false)
-    if (!bedDefensePregameActive) resetBedDefenseState(bedDefense)
+    resetObsidianDetectorState(obsidianDetector)
+    resetBedDefenseState(bedDefense)
+    pendingBedDefenseChunks.clear()
     pruneSessionHistory(sessionState, { clearEntities: true })
     resetSplitReminderMatchState(splitReminderState, false)
     allowBedWarsScoreboardRecovery = true
@@ -3593,13 +3692,9 @@ function bridgePlay(
   upstream.on('packet', (data, meta) => {
     if (upstream.state !== 'play' || downstream.state !== 'play') return
     if (meta.name === 'map_chunk') {
-      observeBedDefenseChunk(data, bedDefense)
-      learnPregameBedDefenseTeams()
-      announceNewBedDefenseDetections()
+      queueBedDefenseChunks([data as BedDefenseChunkPacket])
     } else if (meta.name === 'map_chunk_bulk') {
-      observeBedDefenseBulk(data, bedDefense)
-      learnPregameBedDefenseTeams()
-      announceNewBedDefenseDetections()
+      queueBedDefenseChunks(bedDefenseBulkChunks(data))
     }
     if (shouldRawForwardUpstreamPacket(meta.name)) return
 
@@ -3607,8 +3702,11 @@ function bridgePlay(
       if (meta.name === 'login' || meta.name === 'respawn') {
         clearSessionEntityHistory(sessionState)
         trackLocalGameMode(data, sessionState)
+        bedDefenseChunkScanningArmed = false
+        pendingBedDefenseChunks.clear()
         if (meta.name === 'login') {
           trackBlockHitLocalEntity(data, blockHitSound)
+          resetObsidianDetectorState(obsidianDetector)
           resetBedDefenseState(bedDefense)
         }
         resetBlockHitSoundState(blockHitSound)
@@ -3632,13 +3730,13 @@ function bridgePlay(
       if (meta.name === 'block_change') {
         observeBedDefenseBlockChange(data, bedDefense)
         downstream.write(meta.name, data)
-        announceNewBedDefenseDetections()
+        announceBaseObsidianDetections()
         return
       }
       if (meta.name === 'multi_block_change') {
         observeBedDefenseMultiBlockChange(data, bedDefense)
         downstream.write(meta.name, data)
-        announceNewBedDefenseDetections()
+        announceBaseObsidianDetections()
         return
       }
       if (meta.name === 'chat') {
@@ -3677,16 +3775,12 @@ function bridgePlay(
         }
         const gameStartedAtBeforeChat = splitReminderState.bedWarsGameStartedAt
         const gameEvent = bedWarsGameEvent(flattenChatToText(comp))
-        if (gameEvent === 'pregame' || isBedWarsPregameCountdown(flattenChatToText(comp))) {
-          bedDefensePregameActive = true
-          learnPregameBedDefenseTeams()
-        } else if (gameEvent === 'start') {
-          learnPregameBedDefenseTeams()
-          logPregameBedDefenseSnapshot()
-          bedDefensePregameActive = false
-        } else if (gameEvent === 'end') {
-          bedDefensePregameActive = false
+        if (gameEvent === 'start' || gameEvent === 'pregame') bedDefenseChunkScanningArmed = true
+        if (gameEvent === 'end') {
+          bedDefenseChunkScanningArmed = false
+          pendingBedDefenseChunks.clear()
         }
+        if (gameEvent === 'start') resetObsidianDetectorState(obsidianDetector)
         if (gameEvent === 'start' || gameEvent === 'end' || isBedWarsPregameCountdown(flattenChatToText(comp))) {
           allowBedWarsScoreboardRecovery = false
         }
@@ -3892,7 +3986,7 @@ function bridgePlay(
         trackScoreboardTeam(meta.name, data, sessionState, nicknames)
         recoverBedWarsStateFromScoreboard()
         analyzeScoreboard()
-        announceNewBedDefenseDetections()
+        announceAllObsidianDetections()
         downstream.write(meta.name, withNicknameScoreboardTeam(downstreamTeamPacket, nicknames))
         const currentPlayers = typeof (data as any)?.team === 'string'
           ? Array.from(sessionState.teams.get((data as any).team)?.players || [])
@@ -3921,7 +4015,7 @@ function bridgePlay(
         }
         trackScoreboardDisplayObjective(data, sessionState)
         recoverBedWarsStateFromScoreboard()
-        announceNewBedDefenseDetections()
+        announceAllObsidianDetections()
         downstream.write(meta.name, data)
         if (apolloNickname.configured) {
           refreshApolloNametags(downstream, sessionState, nicknames)
@@ -3933,7 +4027,7 @@ function bridgePlay(
         trackScoreboardScore(data, sessionState)
         recoverBedWarsStateFromScoreboard()
         analyzeScoreboard()
-        announceNewBedDefenseDetections()
+        announceAllObsidianDetections()
         downstream.write(meta.name, withNicknameScoreboardScore(data, nicknames))
         if (typeof (data as any)?.itemName === 'string') {
           refreshApolloPlayers([(data as any).itemName])
@@ -3943,7 +4037,14 @@ function bridgePlay(
 
       if (meta.name === 'named_entity_spawn') {
         trackNamedEntitySpawn(data, sessionState)
+        const entityId = Number((data as any)?.entityId)
+        const pendingEquipment = pendingHeldItemsByEntityId.get(entityId)
+        if (pendingEquipment) {
+          trackEntityEquipment(pendingEquipment, sessionState)
+          pendingHeldItemsByEntityId.delete(entityId)
+        }
         downstream.write(meta.name, withNicknameNamedEntitySpawn(data, nicknames))
+        announceObsidianHolders()
         return
       }
 
@@ -3954,12 +4055,21 @@ function bridgePlay(
       }
 
       if (meta.name === 'entity_equipment') {
+        const entityId = Number((data as any)?.entityId)
+        if (Number((data as any)?.slot) === 0 && Number.isInteger(entityId)) {
+          if (sessionState.playerEntityUuidById.has(entityId)) pendingHeldItemsByEntityId.delete(entityId)
+          else pendingHeldItemsByEntityId.set(entityId, data)
+        }
         trackEntityEquipment(data, sessionState)
         downstream.write(meta.name, data)
+        announceObsidianHolders()
         return
       }
 
       if (meta.name === 'entity_destroy') {
+        for (const entityId of Array.isArray((data as any)?.entityIds) ? (data as any).entityIds : []) {
+          pendingHeldItemsByEntityId.delete(Number(entityId))
+        }
         trackEntityDestroy(data, sessionState)
         downstream.write(meta.name, data)
         return
@@ -4071,7 +4181,8 @@ function bridgePlay(
           })
           return
         }
-        const detections = bedDefenseDetections(bedDefense, activeBedWarsTeamColors(sessionState))
+        announceAllObsidianDetections()
+        const detections = obsidianHolderDetections(obsidianDetector)
         if (!detections.length) {
           sendClientChat(downstream, {
             text: '[Obsidian] No team with obsidian has been detected yet.',
@@ -4080,7 +4191,34 @@ function bridgePlay(
           return
         }
         sendClientChat(downstream, { text: '------- Obsidian Detector -------', color: 'dark_purple' })
-        for (const detection of detections) sendClientChat(downstream, bedDefenseChat(detection))
+        for (const detection of detections) sendClientChat(downstream, obsidianDetectionChat(detection))
+        return
+      }
+
+      const obsidianModeCommand = /^\s*\/(?:obby|obsidian)\s+mode(?:\s+(held|base|both))?\s*$/i.exec(message)
+      if (obsidianModeCommand) {
+        const requestedMode = obsidianModeCommand[1]?.toLowerCase() as 'held' | 'base' | 'both' | undefined
+        if (!requestedMode) {
+          sendClientChat(downstream, {
+            text: `[Obsidian] Detector mode: ${appConfig.bedWars.obsidianDetectorMode}. Use /obby mode held|base|both.`,
+            color: 'yellow'
+          })
+          return
+        }
+        const previousMode = appConfig.bedWars.obsidianDetectorMode
+        updateAppConfig({
+          ...appConfig,
+          bedWars: {
+            ...appConfig.bedWars,
+            obsidianDetectorMode: requestedMode
+          }
+        })
+        if (requestedMode === 'held') pendingBedDefenseChunks.clear()
+        term('Settings', `Obsidian detector mode: ${previousMode} -> ${requestedMode}.`, colors.yellow)
+        sendClientChat(downstream, {
+          text: `[Obsidian] Detector mode changed from ${previousMode} to ${requestedMode}.`,
+          color: 'yellow'
+        })
         return
       }
 
@@ -4245,12 +4383,16 @@ function bridgePlay(
   })
 
   return () => {
+    bridgeClosed = true
+    pendingBedDefenseChunks.clear()
     clearInterval(respawnTimerInterval)
     clearRespawnTimers(respawnTimers)
     pendingRespawnDisconnectChecks.clear()
     respawnProfilesByPlayerKey.clear()
     syntheticRespawnPlayers.clear()
+    pendingHeldItemsByEntityId.clear()
     resetBlockHitSoundState(blockHitSound)
+    resetObsidianDetectorState(obsidianDetector)
     resetBedDefenseState(bedDefense)
     activeBlockHitSoundTests.delete(testThisSessionBlockHitSound)
   }
@@ -4267,6 +4409,8 @@ export const __test = {
   bedWarsTeamColorFromChatComponent,
   bedWarsMapNameFromScoreboard,
   activeBedWarsTeamColors,
+  isBedDefenseScoreboardContext,
+  obsidianHoldersFromSession,
   blockedPlayerTeamContext,
   localTeammatesForBlockContext,
   currentBedWarsModeName,

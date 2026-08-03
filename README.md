@@ -15,7 +15,7 @@ Minecraft 1.8.9 is recommended. The proxy currently uses the Minecraft 1.8 proto
 
 ## Installation
 
-1. Download the repository as a ZIP file from GitHub using **Code > Download ZIP**.
+1. Open the repository's **Releases** page and download `Hypixel-Proxy-Windows.zip` from the latest release.
 2. Extract the entire ZIP to a normal folder, such as `Desktop\Hypixel-Proxy`.
 3. Install Node.js LTS if it is not already installed.
 4. Open the extracted `Hypixel-Proxy` folder.
@@ -28,6 +28,19 @@ app\Hypixel Proxy.exe
 Keep the complete folder together. The Windows application starts the proxy from the files beside it and will not work correctly if only the `.exe` is copied elsewhere.
 
 The first start may take a little longer because the required Node.js packages are installed and the proxy is built locally.
+
+## Updating
+
+The Windows launcher checks GitHub Releases when it opens. When a newer version is available, the **Check updates** button changes to **Update available**.
+
+1. Click **Update available**.
+2. Allow the launcher to stop the proxy if it is running.
+3. Confirm the update.
+4. Wait for the launcher to reopen.
+
+The updater replaces only program files. The complete `state` directory, `.env`, Microsoft authentication cache, nicknames, history, and launcher preferences remain local and are preserved. Git and GitHub CLI are not required.
+
+If no release has been published yet, the button simply reports that no published update is available.
 
 ## Starting the proxy
 
@@ -119,6 +132,7 @@ These commands are handled locally by the proxy and are not sent to Hypixel:
 /nickname list [page]
 /splitsound
 /obby
+/obby mode held|base|both
 ```
 
 Blockhit-ljudet är aktiverat som standard och spelar `mob.irongolem.hit` när du tar skada medan du blockerar med ett svärd. Det kan växlas lokalt med:
@@ -127,13 +141,13 @@ Blockhit-ljudet är aktiverat som standard och spelar `mob.irongolem.hit` när d
 /setting blockhit [on|off]
 ```
 
-The Bed Wars obsidian detector announces when loaded world data confirms obsidian close to a team's bed. `/obby` lists the teams detected so far in the current live match. Toggle it with:
+The Bed Wars obsidian detector combines two complementary methods by default. The held-item detector recognizes a visible player holding obsidian and resolves the team through TAB/scoreboard data. The base detector scans received chunks for obsidian close to a known bed. Both methods share the same alert history, so a team is announced only once. `/obby` lists detections from the current live match. Toggle it with:
 
 ```text
 /setting obby [on|off]
 ```
 
-The detector only uses chunks sent to your Minecraft client. A distant base cannot be detected until its chunks have loaded, and the detector is disabled outside live Bed Wars matches and in replays.
+Choose the active method with `/obby mode held`, `/obby mode base`, or `/obby mode both`. `both` is the default. Both methods only know about data Minecraft has received, so a holder or base must enter render distance. Chunk analysis runs in the background and does not delay world packets during respawn. The detector is disabled outside live Bed Wars matches and in replays.
 
 Settings and nicknames are stored under the local `state` directory.
 
