@@ -2577,6 +2577,21 @@ function activeBedWarsTeamColors(state: SessionState): Set<BedWarsTeamColor> {
   return teams
 }
 
+function activeOpponentBedWarsTeamColors(
+  activeTeams: ReadonlySet<BedWarsTeamColor>,
+  localTeamName: string | null | undefined
+): Set<BedWarsTeamColor> {
+  const normalizedLocalTeam = stripColors(localTeamName || '').trim().toLowerCase()
+  if (!normalizedLocalTeam) return new Set()
+
+  const localTeam = Array.from(activeTeams).find(team => team.toLowerCase() === normalizedLocalTeam)
+  if (!localTeam) return new Set()
+
+  const opponents = new Set(activeTeams)
+  opponents.delete(localTeam)
+  return opponents
+}
+
 function isBedDefenseScoreboardContext(state: SessionState): boolean {
   return scoreboardModeTexts(state).some(text => (
     isBedWarsPregameCountdown(text) || isActiveBedWarsMatchScoreboardText(text)
@@ -3558,7 +3573,11 @@ function bridgePlay(
     if (!appConfig.bedWars.obsidianDetectorEnabled) return
     if (!heldObsidianDetectorEnabled()) return
     if (!isLiveBedWarsMatch(sessionState, splitReminderState)) return
-    const activeTeams = activeBedWarsTeamColors(sessionState)
+    const localTeam = localPlayerTeamSnapshot(sessionState, downstream.username, splitReminderState)
+    const activeTeams = activeOpponentBedWarsTeamColors(
+      activeBedWarsTeamColors(sessionState),
+      localTeam?.colorName || (localTeam ? teamColorName(localTeam.primaryTeam) : null)
+    )
     if (!activeTeams.size) return
     for (const detection of obsidianHoldersFromSession(sessionState, activeTeams)) {
       const { team, playerName } = detection
@@ -3572,7 +3591,11 @@ function bridgePlay(
   const announceBaseObsidianDetections = () => {
     if (!appConfig.bedWars.obsidianDetectorEnabled || !baseObsidianDetectorEnabled()) return
     if (!isLiveBedWarsMatch(sessionState, splitReminderState)) return
-    const activeTeams = activeBedWarsTeamColors(sessionState)
+    const localTeam = localPlayerTeamSnapshot(sessionState, downstream.username, splitReminderState)
+    const activeTeams = activeOpponentBedWarsTeamColors(
+      activeBedWarsTeamColors(sessionState),
+      localTeam?.colorName || (localTeam ? teamColorName(localTeam.primaryTeam) : null)
+    )
     if (!activeTeams.size) return
     for (const base of bedDefenseDetections(bedDefense, activeTeams)) {
       const detection: ObsidianHolderDetection = {
@@ -4494,6 +4517,7 @@ export const __test = {
   bedWarsTeamColorFromChatComponent,
   bedWarsMapNameFromScoreboard,
   activeBedWarsTeamColors,
+  activeOpponentBedWarsTeamColors,
   isBedDefenseScoreboardContext,
   obsidianHoldersFromSession,
   blockedPlayerTeamContext,

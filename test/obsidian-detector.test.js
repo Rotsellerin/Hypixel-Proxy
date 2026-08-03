@@ -75,6 +75,22 @@ assert.deepEqual(
   Array.from(__test.activeBedWarsTeamColors(scoreboardSession)).sort(),
   ['Aqua', 'Red']
 )
+assert.deepEqual(
+  Array.from(__test.activeOpponentBedWarsTeamColors(new Set(['Aqua', 'Red']), 'aqua')).sort(),
+  ['Red']
+)
+assert.deepEqual(
+  Array.from(__test.activeOpponentBedWarsTeamColors(new Set(['Aqua', 'Red']), '\u00a7bAqua')).sort(),
+  ['Red']
+)
+assert.deepEqual(
+  Array.from(__test.activeOpponentBedWarsTeamColors(new Set(['Aqua', 'Red']), null)),
+  []
+)
+assert.deepEqual(
+  Array.from(__test.activeOpponentBedWarsTeamColors(new Set(['Aqua', 'Red']), 'Unknown')),
+  []
+)
 assert.equal(__test.isBedDefenseScoreboardContext(scoreboardSession), false)
 scoreboardSession.scores.set('timer', {
   itemName: 'Diamond II in 5:00',
