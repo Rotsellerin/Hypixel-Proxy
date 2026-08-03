@@ -37,27 +37,36 @@ public sealed class MainForm : Form
     private readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(2) };
     private readonly System.Windows.Forms.Timer refreshTimer = new() { Interval = 500 };
     private readonly System.Windows.Forms.Timer splitSoundTimer = new() { Interval = 250 };
+    private readonly System.Windows.Forms.Timer blockHitSoundTimer = new() { Interval = 50 };
     private readonly byte[]? splitSoundWave;
+    private readonly byte[]? blockHitSoundWave;
     private readonly string rootDir;
     private readonly Uri dashboardUri;
     private readonly TableLayoutPanel rootLayout = new();
 
     private SoundPlayer? splitSoundPlayer;
     private MemoryStream? splitSoundStream;
+    private SoundPlayer? blockHitSoundPlayer;
+    private MemoryStream? blockHitSoundStream;
+    private int blockHitSoundPlayerVolume = -1;
     private int splitSoundPlayerVolume = -1;
     private int splitSoundVolume;
+    private int blockHitSoundVolume;
     private ProxyStatus? lastStatus;
     private Process? proxyProcess;
     private int missedStatusPolls;
     private bool refreshInFlight;
     private bool splitSoundRefreshInFlight;
+    private bool blockHitSoundRefreshInFlight;
     private bool splitSoundEndpointAvailable;
     private bool routeChanging;
     private bool splitChanging;
+    private bool blockHitChanging;
     private bool closingConfirmed;
     private bool logsExpanded;
     private bool qolDrawerOpen;
     private long? lastSplitSoundEventId;
+    private long? lastBlockHitSoundEventId;
     private bool splitSoundLogInitialized;
     private string? lastSplitSoundLogSignature;
 
@@ -91,6 +100,9 @@ public sealed class MainForm : Form
     private readonly ModernButton closeQolButton = ModernButton.Ghost("Close");
     private readonly ModernButton expandLogsButton = ModernButton.Secondary("Expand");
     private readonly ToggleSwitch splitToggle = new();
+    private readonly ToggleSwitch blockHitToggle = new();
+    private readonly VolumeSlider blockHitSoundVolumeSlider = new();
+    private readonly Label blockHitSoundVolumeValue = new();
     private readonly TerminalLogView logsView = new();
     private readonly RoundedPanel qolDrawer = new() { Radius = 12, FillColor = Surface, BorderColor = Border };
     private readonly RoundedPanel authPanel = new() { Radius = 8, FillColor = Color.FromArgb(230, 249, 244), BorderColor = Color.FromArgb(122, 207, 185) };
@@ -99,6 +111,7 @@ public sealed class MainForm : Form
     private readonly ModernButton openBrowserButton = ModernButton.Secondary("Open browser");
     private readonly ModernButton copyCodeButton = ModernButton.Primary("Copy code", Accent);
     private readonly ModernButton testSplitSoundButton = ModernButton.Secondary("Test sound");
+    private readonly ModernButton testBlockHitSoundButton = ModernButton.Secondary("Test sound");
     private readonly VolumeSlider splitSoundVolumeSlider = new();
     private readonly Label splitSoundVolumeValue = new();
     private Control? mainArea;
@@ -108,7 +121,9 @@ public sealed class MainForm : Form
         rootDir = FindRootDirectory();
         dashboardUri = ReadDashboardUri(rootDir);
         splitSoundWave = LoadSplitSoundWave();
+        blockHitSoundWave = LoadBlockHitSoundWave();
         splitSoundVolume = LoadSplitSoundVolume(rootDir);
+        blockHitSoundVolume = LoadBlockHitSoundVolume(rootDir);
 
         Text = "Hypixel Proxy";
         if (WindowIcon is not null) Icon = WindowIcon;
@@ -123,12 +138,15 @@ public sealed class MainForm : Form
 
         refreshTimer.Tick += async (_, _) => await RefreshStatusAsync();
         splitSoundTimer.Tick += async (_, _) => await RefreshSplitSoundAsync();
+        blockHitSoundTimer.Tick += async (_, _) => await RefreshBlockHitSoundAsync();
         Shown += async (_, _) =>
         {
             refreshTimer.Start();
             splitSoundTimer.Start();
+            blockHitSoundTimer.Start();
             await RefreshStatusAsync();
             await RefreshSplitSoundAsync();
+            await RefreshBlockHitSoundAsync();
         };
         FormClosing += async (_, e) =>
         {
@@ -145,10 +163,15 @@ public sealed class MainForm : Form
             if (close == DialogResult.Yes) await StopProxyAsync();
             refreshTimer.Stop();
             splitSoundTimer.Stop();
+            blockHitSoundTimer.Stop();
             closingConfirmed = true;
             BeginInvoke(Close);
         };
-        FormClosed += (_, _) => DisposeSplitSoundPlayer();
+        FormClosed += (_, _) =>
+        {
+            DisposeSplitSoundPlayer();
+            DisposeBlockHitSoundPlayers();
+        };
     }
 
     private void BuildUi()
@@ -499,26 +522,98 @@ public sealed class MainForm : Form
 
         layout.Controls.Add(splitCard, 0, 1);
 
-        var empty = new RoundedPanel
+        var blockHitCard = new RoundedPanel
         {
             Dock = DockStyle.Fill,
-            FillColor = SurfaceMuted,
+            FillColor = SurfaceAlt,
             BorderColor = BorderSoft,
             Radius = 8,
             Padding = new Padding(16),
             Margin = new Padding(0),
-            BackColor = SurfaceMuted
+            BackColor = SurfaceAlt
         };
-        empty.Controls.Add(new Label
+        var blockHitLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, BackColor = SurfaceAlt };
+        blockHitLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        blockHitLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
+        blockHitLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
+        blockHitLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        blockHitCard.Controls.Add(blockHitLayout);
+
+        var blockHitHeader = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, BackColor = SurfaceAlt };
+        blockHitHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        blockHitHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 56));
+        blockHitHeader.Controls.Add(new Label
         {
-            Text = "More QoL tools will appear here later.",
-            Dock = DockStyle.Top,
-            Height = 42,
-            Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
-            ForeColor = TextMuted,
+            Text = "Blockhit sound",
+            Dock = DockStyle.Fill,
+            Font = new Font("Segoe UI", 11.5f, FontStyle.Bold),
+            ForeColor = TextStrong,
             TextAlign = ContentAlignment.MiddleLeft
-        });
-        layout.Controls.Add(empty, 0, 2);
+        }, 0, 0);
+        blockHitToggle.Dock = DockStyle.Right;
+        blockHitToggle.Margin = new Padding(0, 4, 0, 4);
+        blockHitToggle.CheckedChanged += async (_, _) =>
+        {
+            if (blockHitChanging) return;
+            await SetBlockHitSoundEnabledAsync(blockHitToggle.Checked);
+        };
+        blockHitHeader.Controls.Add(blockHitToggle, 1, 0);
+        blockHitLayout.Controls.Add(blockHitHeader, 0, 0);
+
+        blockHitLayout.Controls.Add(new Label
+        {
+            Text = "Play mob.irongolem.hit when you take damage while blocking with a sword.",
+            Dock = DockStyle.Fill,
+            Font = new Font("Segoe UI", 9.25f),
+            ForeColor = TextMuted,
+            TextAlign = ContentAlignment.TopLeft
+        }, 0, 1);
+
+        var blockHitVolumeRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, BackColor = SurfaceAlt };
+        blockHitVolumeRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 68));
+        blockHitVolumeRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        blockHitVolumeRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 48));
+        blockHitVolumeRow.Controls.Add(new Label
+        {
+            Text = "Volume",
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0),
+            Font = new Font("Segoe UI", 9.25f, FontStyle.Bold),
+            ForeColor = TextStrong,
+            TextAlign = ContentAlignment.MiddleLeft
+        }, 0, 0);
+
+        blockHitSoundVolumeSlider.Dock = DockStyle.Fill;
+        blockHitSoundVolumeSlider.Margin = new Padding(8, 9, 8, 9);
+        blockHitSoundVolumeSlider.AccessibleName = "Blockhit sound volume";
+        blockHitSoundVolumeSlider.Value = blockHitSoundVolume;
+        blockHitSoundVolumeSlider.ValueChanged += (_, _) =>
+        {
+            blockHitSoundVolume = blockHitSoundVolumeSlider.Value;
+            blockHitSoundVolumeValue.Text = $"{blockHitSoundVolume}%";
+            blockHitSoundPlayerVolume = -1;
+        };
+        blockHitSoundVolumeSlider.ValueCommitted += async (_, _) =>
+        {
+            if (blockHitChanging) return;
+            SaveLauncherSettings();
+            if (lastStatus is not null) await SetBlockHitSoundVolumeAsync(blockHitSoundVolume);
+        };
+        blockHitVolumeRow.Controls.Add(blockHitSoundVolumeSlider, 1, 0);
+
+        blockHitSoundVolumeValue.Dock = DockStyle.Fill;
+        blockHitSoundVolumeValue.Text = $"{blockHitSoundVolume}%";
+        blockHitSoundVolumeValue.Font = new Font("Segoe UI", 9.25f, FontStyle.Bold);
+        blockHitSoundVolumeValue.ForeColor = TextMuted;
+        blockHitSoundVolumeValue.TextAlign = ContentAlignment.MiddleRight;
+        blockHitVolumeRow.Controls.Add(blockHitSoundVolumeValue, 2, 0);
+        blockHitLayout.Controls.Add(blockHitVolumeRow, 0, 2);
+
+        testBlockHitSoundButton.Dock = DockStyle.Fill;
+        testBlockHitSoundButton.Margin = new Padding(0, 2, 0, 0);
+        testBlockHitSoundButton.Click += (_, _) => PlayBlockHitSound();
+        blockHitLayout.Controls.Add(testBlockHitSoundButton, 0, 3);
+        layout.Controls.Add(blockHitCard, 0, 2);
     }
 
     private Control BuildLogsCard()
@@ -699,6 +794,36 @@ public sealed class MainForm : Form
         }
     }
 
+    private async Task RefreshBlockHitSoundAsync()
+    {
+        if (blockHitSoundRefreshInFlight) return;
+        blockHitSoundRefreshInFlight = true;
+
+        try
+        {
+            var status = await TryGetBlockHitSoundStatusAsync();
+            if (status is null) return;
+
+            if (lastBlockHitSoundEventId is null || status.EventId < lastBlockHitSoundEventId.Value)
+            {
+                lastBlockHitSoundEventId = status.EventId;
+                return;
+            }
+
+            if (status.EventId == lastBlockHitSoundEventId.Value) return;
+            lastBlockHitSoundEventId = status.EventId;
+            PlayBlockHitSound();
+        }
+        catch
+        {
+            // Audio notification failure must never affect proxy controls.
+        }
+        finally
+        {
+            blockHitSoundRefreshInFlight = false;
+        }
+    }
+
     private void RenderStatus(ProxyStatus? status)
     {
         if (status is null)
@@ -712,6 +837,9 @@ public sealed class MainForm : Form
             stopTheLagRoute.Enabled = false;
             hypixelFastRoute.Enabled = false;
             splitToggle.Enabled = false;
+            blockHitToggle.Enabled = false;
+            blockHitSoundVolumeSlider.Enabled = true;
+            testBlockHitSoundButton.Enabled = true;
             if (!routeChanging) logsView.LogText = "Proxy is not running.";
             authPanel.Visible = false;
             SetAuthHeight(0);
@@ -727,6 +855,9 @@ public sealed class MainForm : Form
         stopTheLagRoute.Enabled = !routeChanging;
         hypixelFastRoute.Enabled = !routeChanging;
         splitToggle.Enabled = !routeChanging;
+        blockHitToggle.Enabled = !routeChanging;
+        blockHitSoundVolumeSlider.Enabled = true;
+        testBlockHitSoundButton.Enabled = true;
 
         foreach (var route in status.Routes)
         {
@@ -745,6 +876,16 @@ public sealed class MainForm : Form
         splitChanging = true;
         splitToggle.Checked = status.SplitReminder?.Enabled ?? true;
         splitChanging = false;
+
+        blockHitChanging = true;
+        blockHitToggle.Checked = status.Qol?.BlockHitSoundEnabled ?? true;
+        if (!blockHitSoundVolumeSlider.IsDragging)
+        {
+            blockHitSoundVolumeSlider.Value = status.Qol?.BlockHitSoundVolume ?? 50;
+            blockHitSoundVolume = blockHitSoundVolumeSlider.Value;
+            blockHitSoundVolumeValue.Text = $"{blockHitSoundVolume}%";
+        }
+        blockHitChanging = false;
 
         if (!splitSoundEndpointAvailable) HandleSplitSoundLog(status.Logs);
 
@@ -891,6 +1032,18 @@ public sealed class MainForm : Form
         }
     }
 
+    private async Task<BlockHitSoundStatus?> TryGetBlockHitSoundStatusAsync()
+    {
+        try
+        {
+            return await http.GetFromJsonAsync<BlockHitSoundStatus>(new Uri(dashboardUri, "/api/blockhit-sound/events"));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private async Task SetRouteAsync(string routeId)
     {
         if (routeChanging) return;
@@ -938,6 +1091,52 @@ public sealed class MainForm : Form
         catch (Exception error)
         {
             MessageBox.Show(error.Message, "Could not update split reminder", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private async Task SetBlockHitSoundEnabledAsync(bool enabled)
+    {
+        try
+        {
+            using var response = await http.PostAsJsonAsync(new Uri(dashboardUri, "/api/blockhit-sound"), new { enabled });
+            response.EnsureSuccessStatusCode();
+            await RefreshStatusAsync();
+        }
+        catch (Exception error)
+        {
+            MessageBox.Show(error.Message, "Could not update blockhit sound", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private async Task TestBlockHitSoundAsync()
+    {
+        try
+        {
+            using var response = await http.PostAsync(new Uri(dashboardUri, "/api/blockhit-sound/test"), null);
+            response.EnsureSuccessStatusCode();
+            var result = await response.Content.ReadFromJsonAsync<BlockHitSoundTestResult>();
+            if (result is null || result.PlayedSessions < 1)
+            {
+                MessageBox.Show("Join the proxy in Minecraft before testing the sound.", "Blockhit sound", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+        }
+        catch (Exception error)
+        {
+            MessageBox.Show(error.Message, "Could not test blockhit sound", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private async Task SetBlockHitSoundVolumeAsync(int volume)
+    {
+        try
+        {
+            using var response = await http.PostAsJsonAsync(new Uri(dashboardUri, "/api/blockhit-sound"), new { volume });
+            response.EnsureSuccessStatusCode();
+            await RefreshStatusAsync();
+        }
+        catch (Exception error)
+        {
+            MessageBox.Show(error.Message, "Could not update blockhit volume", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
 
@@ -1150,11 +1349,76 @@ public sealed class MainForm : Form
         splitSoundPlayerVolume = -1;
     }
 
+    private void PlayBlockHitSound()
+    {
+        var volume = blockHitSoundVolumeSlider.Value;
+        if (volume <= 0 || blockHitSoundWave is null) return;
+
+        try
+        {
+            EnsureBlockHitSoundPlayer(volume);
+            blockHitSoundPlayer?.Play();
+        }
+        catch
+        {
+            // Audio notification failure must never affect proxy controls.
+        }
+    }
+
+    private void EnsureBlockHitSoundPlayer(int volume)
+    {
+        if (blockHitSoundPlayer is not null && blockHitSoundPlayerVolume == volume) return;
+        if (blockHitSoundWave is null) return;
+
+        DisposeBlockHitSoundPlayers();
+        try
+        {
+            var adjustedWave = ApplyWaveVolume(blockHitSoundWave, volume);
+            blockHitSoundStream = new MemoryStream(adjustedWave, writable: false);
+            blockHitSoundPlayer = new SoundPlayer(blockHitSoundStream);
+            blockHitSoundPlayer.Load();
+            blockHitSoundPlayerVolume = volume;
+        }
+        catch
+        {
+            blockHitSoundPlayer?.Dispose();
+            blockHitSoundStream?.Dispose();
+            blockHitSoundPlayer = null;
+            blockHitSoundStream = null;
+            blockHitSoundPlayerVolume = -1;
+        }
+    }
+
+    private void DisposeBlockHitSoundPlayers()
+    {
+        try
+        {
+            blockHitSoundPlayer?.Stop();
+            blockHitSoundPlayer?.Dispose();
+            blockHitSoundStream?.Dispose();
+        }
+        catch
+        {
+        }
+        blockHitSoundPlayer = null;
+        blockHitSoundStream = null;
+        blockHitSoundPlayerVolume = -1;
+    }
+
     private static byte[]? LoadSplitSoundWave()
     {
         using var stream = typeof(MainForm).Assembly.GetManifestResourceStream("HypixelProxy.App.Assets.SplitPling.wav");
         if (stream is null) return null;
 
+        using var buffer = new MemoryStream();
+        stream.CopyTo(buffer);
+        return buffer.ToArray();
+    }
+
+    private static byte[]? LoadBlockHitSoundWave()
+    {
+        using var stream = typeof(MainForm).Assembly.GetManifestResourceStream("HypixelProxy.App.Assets.IronGolemHit1.wav");
+        if (stream is null) return null;
         using var buffer = new MemoryStream();
         stream.CopyTo(buffer);
         return buffer.ToArray();
@@ -1222,6 +1486,21 @@ public sealed class MainForm : Form
         }
     }
 
+    private static int LoadBlockHitSoundVolume(string rootDirectory)
+    {
+        try
+        {
+            var path = Path.Combine(rootDirectory, "state", "launcher-settings.json");
+            if (!File.Exists(path)) return 50;
+            var settings = JsonSerializer.Deserialize<LauncherSettings>(File.ReadAllText(path));
+            return Math.Clamp(settings?.BlockHitSoundVolume ?? 50, 0, 100);
+        }
+        catch
+        {
+            return 50;
+        }
+    }
+
     private void SaveLauncherSettings()
     {
         try
@@ -1230,7 +1509,11 @@ public sealed class MainForm : Form
             Directory.CreateDirectory(stateDirectory);
             var path = Path.Combine(stateDirectory, "launcher-settings.json");
             var json = JsonSerializer.Serialize(
-                new LauncherSettings { SplitSoundVolume = splitSoundVolume },
+                new LauncherSettings
+                {
+                    SplitSoundVolume = splitSoundVolume,
+                    BlockHitSoundVolume = blockHitSoundVolume
+                },
                 new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(path, json);
         }
@@ -1243,6 +1526,7 @@ public sealed class MainForm : Form
     private sealed class LauncherSettings
     {
         public int SplitSoundVolume { get; set; } = 100;
+        public int BlockHitSoundVolume { get; set; } = 50;
     }
 
     private sealed class ProxyStatus
@@ -1262,6 +1546,9 @@ public sealed class MainForm : Form
         [JsonPropertyName("splitReminder")]
         public SplitReminderInfo? SplitReminder { get; set; }
 
+        [JsonPropertyName("qol")]
+        public QolInfo? Qol { get; set; }
+
         [JsonPropertyName("logs")]
         public List<LogEntry> Logs { get; set; } = [];
     }
@@ -1272,10 +1559,31 @@ public sealed class MainForm : Form
         public long EventId { get; set; }
     }
 
+    private sealed class BlockHitSoundStatus
+    {
+        [JsonPropertyName("eventId")]
+        public long EventId { get; set; }
+    }
+
     private sealed class SplitReminderInfo
     {
         [JsonPropertyName("enabled")]
         public bool Enabled { get; set; }
+    }
+
+    private sealed class QolInfo
+    {
+        [JsonPropertyName("blockHitSoundEnabled")]
+        public bool BlockHitSoundEnabled { get; set; }
+
+        [JsonPropertyName("blockHitSoundVolume")]
+        public int BlockHitSoundVolume { get; set; } = 50;
+    }
+
+    private sealed class BlockHitSoundTestResult
+    {
+        [JsonPropertyName("playedSessions")]
+        public int PlayedSessions { get; set; }
     }
 
     private sealed class RouteInfo
@@ -1575,6 +1883,9 @@ public sealed class MainForm : Form
 
         public event EventHandler? ValueChanged;
         public event EventHandler? ValueCommitted;
+
+        [Browsable(false)]
+        public bool IsDragging => dragging;
 
         [Browsable(false)]
         [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]

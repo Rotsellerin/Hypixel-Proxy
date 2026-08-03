@@ -29,15 +29,32 @@ const normalized = normalizeAppConfig({
 })
 assert.equal(normalized.routeId, 'stopthelag')
 assert.equal(normalized.bedWars.respawnTimerEnabled, true)
+assert.equal(normalized.bedWars.obsidianDetectorEnabled, true)
+assert.equal(normalized.qol.blockHitSoundEnabled, true)
+assert.equal(normalized.qol.blockHitSoundVolume, 50)
 assert.equal(normalized.splitReminder.enabled, false)
 assert.equal(normalized.splitReminder.respawnedText, 'RESPAWNED')
 assert.equal(normalized.splitReminder.replacementText, 'SPLIT NOW')
 assert.equal(normalizeAppConfig({ routeId: 'hypixelfast' }).routeId, 'hypixelfast')
 assert.equal(normalizeAppConfig({
   bedWars: {
-    respawnTimerEnabled: false
+    respawnTimerEnabled: false,
+    obsidianDetectorEnabled: false
   }
 }).bedWars.respawnTimerEnabled, false)
+assert.equal(normalizeAppConfig({
+  bedWars: {
+    obsidianDetectorEnabled: false
+  }
+}).bedWars.obsidianDetectorEnabled, false)
+assert.equal(normalizeAppConfig({
+  qol: {
+    blockHitSoundEnabled: false,
+    blockHitSoundVolume: 22.4
+  }
+}).qol.blockHitSoundEnabled, false)
+assert.equal(normalizeAppConfig({ qol: { blockHitSoundVolume: 22.4 } }).qol.blockHitSoundVolume, 22)
+assert.equal(normalizeAppConfig({ qol: { blockHitSoundVolume: 150 } }).qol.blockHitSoundVolume, 100)
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hypixel-proxy-'))
 try {
@@ -45,6 +62,8 @@ try {
 
   saveAppConfig(tmp, {
     routeId: 'stopthelag',
+    qol: normalized.qol,
+    bedWars: normalized.bedWars,
     splitReminder: {
       ...normalized.splitReminder,
       enabled: true

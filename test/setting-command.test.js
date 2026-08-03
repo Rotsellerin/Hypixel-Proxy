@@ -36,6 +36,8 @@ assert.equal(
   'bedwars.tablist.show_respawn_timer'
 )
 assert.equal(__test.canonicalSettingPath('unknown'), null)
+assert.equal(__test.canonicalSettingPath('blockhit'), 'qol.blockhit_sound')
+assert.equal(__test.canonicalSettingPath('obby'), 'bedwars.obsidian_detector')
 
 const initial = defaultAppConfig()
 assert.equal(
@@ -52,6 +54,8 @@ assert.equal(disabledTimer.oldValue, true)
 assert.equal(disabledTimer.newValue, false)
 assert.equal(disabledTimer.config.bedWars.respawnTimerEnabled, false)
 assert.equal(initial.bedWars.respawnTimerEnabled, true)
+assert.equal(initial.qol.blockHitSoundEnabled, true)
+assert.equal(initial.bedWars.obsidianDetectorEnabled, true)
 
 const enabledTimer = __test.changeLocalSetting(
   disabledTimer.config,
@@ -66,5 +70,17 @@ assert.equal(disabledSplit.path, 'qol.split_reminder')
 assert.equal(disabledSplit.oldValue, true)
 assert.equal(disabledSplit.newValue, false)
 assert.equal(disabledSplit.config.splitReminder.enabled, false)
+
+const disabledBlockHit = __test.changeLocalSetting(initial, 'blockhit', false)
+assert.equal(disabledBlockHit.path, 'qol.blockhit_sound')
+assert.equal(disabledBlockHit.oldValue, true)
+assert.equal(disabledBlockHit.newValue, false)
+assert.equal(disabledBlockHit.config.qol.blockHitSoundEnabled, false)
+
+const disabledObsidianDetector = __test.changeLocalSetting(initial, 'obby', false)
+assert.equal(disabledObsidianDetector.path, 'bedwars.obsidian_detector')
+assert.equal(disabledObsidianDetector.oldValue, true)
+assert.equal(disabledObsidianDetector.newValue, false)
+assert.equal(disabledObsidianDetector.config.bedWars.obsidianDetectorEnabled, false)
 
 assert.equal(__test.changeLocalSetting(initial, 'unknown', null), null)

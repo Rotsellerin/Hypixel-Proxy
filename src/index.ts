@@ -16,6 +16,29 @@ import {
   trackBlockListCommand
 } from './state/blockNickHistory'
 import {
+  blockHitSoundPacket,
+  createBlockHitSoundState,
+  observeBlockHitEntityStatus,
+  observeBlockHitHealth,
+  releaseSwordBlock,
+  resetBlockHitSoundState,
+  trackBlockHitLocalEntity,
+  trackBlockHitPosition,
+  trackSwordBlock
+} from './state/blockHitSoundState'
+import {
+  BedDefenseDetection,
+  BedWarsTeamColor,
+  bedDefenseDetections,
+  collectNewBedDefenseDetections,
+  createBedDefenseState,
+  observeBedDefenseBlockChange,
+  observeBedDefenseBulk,
+  observeBedDefenseChunk,
+  observeBedDefenseMultiBlockChange,
+  resetBedDefenseState
+} from './state/bedDefenseState'
+import {
   SessionState,
   TeamState,
   clearSessionEntityHistory,
@@ -139,6 +162,9 @@ const eventLoopDiagnosticsInterval = setInterval(() => {
 }, 1000)
 eventLoopDiagnosticsInterval.unref?.()
 let splitSoundEventId = 0
+let blockHitSoundEventId = 0
+let lastBlockHitSoundPollAt = 0
+const activeBlockHitSoundTests = new Set<() => boolean>()
 const VERSION_LABEL = (() => {
   try {
     return JSON.parse(fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf8')).version || '1.0.0'
@@ -309,6 +335,39 @@ function setSplitReminderEnabled(enabled: boolean) {
   return dashboardStatus()
 }
 
+function setBlockHitSoundEnabled(enabled: boolean) {
+  updateAppConfig({
+    ...appConfig,
+    qol: {
+      ...appConfig.qol,
+      blockHitSoundEnabled: enabled
+    }
+  })
+  term('QoL', `Blockhit sound ${enabled ? 'enabled' : 'disabled'}.`, colors.yellow)
+  return dashboardStatus()
+}
+
+function setBlockHitSoundVolume(volume: number) {
+  const nextVolume = Math.max(0, Math.min(100, Math.round(volume)))
+  updateAppConfig({
+    ...appConfig,
+    qol: {
+      ...appConfig.qol,
+      blockHitSoundVolume: nextVolume
+    }
+  })
+  term('QoL', `Blockhit sound volume set to ${nextVolume}%.`, colors.yellow)
+  return dashboardStatus()
+}
+
+function testBlockHitSound() {
+  let playedSessions = 0
+  for (const playSound of activeBlockHitSoundTests) {
+    if (playSound()) playedSessions += 1
+  }
+  return { ok: playedSessions > 0, playedSessions }
+}
+
 const LOCAL_SETTING_DEFINITIONS = [
   {
     path: 'bedwars.tablist.show_respawn_timer',
@@ -316,9 +375,19 @@ const LOCAL_SETTING_DEFINITIONS = [
     displayName: 'Show Respawn Timer'
   },
   {
+    path: 'bedwars.obsidian_detector',
+    aliases: ['obsidian_detector', 'obsidian-detector', 'obby'],
+    displayName: 'Obsidian Detector'
+  },
+  {
     path: 'qol.split_reminder',
     aliases: ['split_reminder', 'split-reminder', 'split'],
     displayName: 'SPLIT Reminder'
+  },
+  {
+    path: 'qol.blockhit_sound',
+    aliases: ['blockhit_sound', 'blockhit-sound', 'blockhit'],
+    displayName: 'Blockhit Sound'
   }
 ] as const
 
@@ -357,8 +426,14 @@ function localSettingValue(config: AppConfig, pathValue: string): boolean | null
   if (settingPath === 'bedwars.tablist.show_respawn_timer') {
     return config.bedWars.respawnTimerEnabled
   }
+  if (settingPath === 'bedwars.obsidian_detector') {
+    return config.bedWars.obsidianDetectorEnabled
+  }
   if (settingPath === 'qol.split_reminder') {
     return config.splitReminder.enabled
+  }
+  if (settingPath === 'qol.blockhit_sound') {
+    return config.qol.blockHitSoundEnabled
   }
   return null
 }
@@ -384,12 +459,28 @@ function changeLocalSetting(
         respawnTimerEnabled: newValue
       }
     }
-  } else {
+  } else if (settingPath === 'bedwars.obsidian_detector') {
+    nextConfig = {
+      ...config,
+      bedWars: {
+        ...config.bedWars,
+        obsidianDetectorEnabled: newValue
+      }
+    }
+  } else if (settingPath === 'qol.split_reminder') {
     nextConfig = {
       ...config,
       splitReminder: {
         ...config.splitReminder,
         enabled: newValue
+      }
+    }
+  } else {
+    nextConfig = {
+      ...config,
+      qol: {
+        ...config.qol,
+        blockHitSoundEnabled: newValue
       }
     }
   }
@@ -434,6 +525,7 @@ function dashboardStatus() {
     route,
     routes: ROUTES,
     bedWars: appConfig.bedWars,
+    qol: appConfig.qol,
     splitReminder: appConfig.splitReminder,
     diagnostics: {
       process: {
@@ -925,6 +1017,11 @@ function addLocalTeamPlayersFromTabLetter(
 
 function splitSoundStatus() {
   return { eventId: splitSoundEventId }
+}
+
+function blockHitSoundStatus() {
+  lastBlockHitSoundPollAt = Date.now()
+  return { eventId: blockHitSoundEventId }
 }
 
 function retainLocalBedWarsTabTeams(state?: SessionState, localPlayerName?: string) {
@@ -2455,6 +2552,19 @@ function scoreboardModeTexts(state: SessionState): string[] {
   return Array.from(new Set(lines))
 }
 
+function activeBedWarsTeamColors(state: SessionState): Set<BedWarsTeamColor> {
+  const teams = new Set<BedWarsTeamColor>()
+  const teamPattern = /\b(Red|Blue|Green|Yellow|Aqua|White|Pink|Gray):/gi
+  for (const text of scoreboardModeTexts(state)) {
+    const clean = stripColors(text).replace(/\s+/g, ' ')
+    for (const match of clean.matchAll(teamPattern)) {
+      const name = match[1][0].toUpperCase() + match[1].slice(1).toLowerCase()
+      teams.add(name as BedWarsTeamColor)
+    }
+  }
+  return teams
+}
+
 function bedWarsMapNameFromScoreboard(state: SessionState): string | null {
   for (const text of scoreboardModeTexts(state)) {
     const clean = stripColors(text).replace(/\s+/g, ' ').trim()
@@ -3132,6 +3242,8 @@ function bridgePlay(
   splitReminderState: SplitReminderState
 ) {
   const blockNickHistory = loadBlockNickHistory()
+  const blockHitSound = createBlockHitSoundState()
+  const bedDefense = createBedDefenseState()
   let lastLobbyCommandKey = ''
   let lastLobbyCommandAt = 0
   let currentWindowId = -1
@@ -3142,6 +3254,8 @@ function bridgePlay(
   let lastScoreboardAnalysisAt = 0
   let scoreboardAnalysisDeferred = false
   let allowBedWarsScoreboardRecovery = true
+  let bedDefensePregameActive = false
+  let lastPregameSnapshotLogSignature = ''
   let lastBedWarsMapName = ''
   let recentLocalChat: { message: string; sentAt: number } | null = null
   let lastRespawnDeathKey = ''
@@ -3214,9 +3328,27 @@ function bridgePlay(
     return transferWatch.active
   }
 
+  const learnPregameBedDefenseTeams = () => {
+    if (!bedDefensePregameActive || !appConfig.bedWars.obsidianDetectorEnabled) return
+    bedDefenseDetections(bedDefense)
+  }
+
+  const logPregameBedDefenseSnapshot = () => {
+    const bedBlocks = bedDefense.teamByBedKey.size
+    const bases = new Set(bedDefense.teamByBedKey.values()).size
+    const signature = `${bases}:${bedBlocks}`
+    if (!bedBlocks || signature === lastPregameSnapshotLogSignature) return
+    lastPregameSnapshotLogSignature = signature
+    term('QoL', `Pregame snapshot captured ${bases} base(s) (${bedBlocks} bed blocks).`, colors.magenta)
+  }
+
   const analyzeScoreboard = (force = false) => {
     const detectedMap = bedWarsMapNameFromScoreboard(sessionState)
     if (detectedMap) lastBedWarsMapName = detectedMap
+    if (scoreboardModeTexts(sessionState).some(isBedWarsPregameCountdown)) {
+      bedDefensePregameActive = true
+      learnPregameBedDefenseTeams()
+    }
     if (!appConfig.splitReminder.enabled) return
     if (isTransferActive()) {
       scoreboardAnalysisDeferred = true
@@ -3231,6 +3363,59 @@ function bridgePlay(
     const mode = updateBedWarsModeFromScoreboard(sessionState, splitReminderState)
     logBedWarsModeIfChanged(splitReminderState, mode)
     logLocalTeamIfChanged(sessionState, downstream.username, splitReminderState)
+  }
+
+  const playMinecraftBlockHitSound = (force = false): boolean => {
+    if ((!force && !appConfig.qol.blockHitSoundEnabled) || downstream.state !== 'play') return false
+    const volumePercent = appConfig.qol.blockHitSoundVolume
+    const packet = blockHitSoundPacket(blockHitSound, volumePercent / 100)
+    if (!packet || volumePercent <= 0) return false
+    try {
+      downstream.write('named_sound_effect', packet)
+      return true
+    } catch {
+      return false
+    }
+  }
+  const announceBlockHitSound = (force = false): boolean => {
+    if (!force && !appConfig.qol.blockHitSoundEnabled) return false
+    blockHitSoundEventId += 1
+    if (Date.now() - lastBlockHitSoundPollAt <= 1000) return true
+    return playMinecraftBlockHitSound(force)
+  }
+  const testThisSessionBlockHitSound = () => announceBlockHitSound(true)
+  activeBlockHitSoundTests.add(testThisSessionBlockHitSound)
+
+  const bedDefenseTeamColor: Record<string, string> = {
+    Red: 'red',
+    Blue: 'blue',
+    Green: 'green',
+    Yellow: 'yellow',
+    Aqua: 'aqua',
+    White: 'white',
+    Pink: 'light_purple',
+    Gray: 'gray'
+  }
+
+  const bedDefenseChat = (detection: BedDefenseDetection) => ({
+    text: '',
+    extra: [
+      { text: '[Obsidian] ', color: 'dark_purple', bold: true },
+      { text: detection.team, color: bedDefenseTeamColor[detection.team] || 'white', bold: true },
+      { text: ' team has obsidian at their bed.', color: 'yellow' }
+    ]
+  })
+
+  const announceNewBedDefenseDetections = () => {
+    if (!appConfig.bedWars.obsidianDetectorEnabled) return
+    if (!isLiveBedWarsMatch(sessionState, splitReminderState)) return
+    const activeTeams = activeBedWarsTeamColors(sessionState)
+    if (!activeTeams.size) return
+    for (const detection of collectNewBedDefenseDetections(bedDefense, activeTeams)) {
+      sendClientChat(downstream, bedDefenseChat(detection))
+      splitSoundEventId += 1
+      term('QoL', `Obsidian detected at ${detection.team} bed.`, colors.magenta)
+    }
   }
 
   const recoverBedWarsStateFromScoreboard = () => {
@@ -3356,6 +3541,7 @@ function bridgePlay(
 
   const resetForScoreboardTransition = () => {
     clearActiveRespawnTimers(false)
+    if (!bedDefensePregameActive) resetBedDefenseState(bedDefense)
     pruneSessionHistory(sessionState, { clearEntities: true })
     resetSplitReminderMatchState(splitReminderState, false)
     allowBedWarsScoreboardRecovery = true
@@ -3406,16 +3592,54 @@ function bridgePlay(
 
   upstream.on('packet', (data, meta) => {
     if (upstream.state !== 'play' || downstream.state !== 'play') return
+    if (meta.name === 'map_chunk') {
+      observeBedDefenseChunk(data, bedDefense)
+      learnPregameBedDefenseTeams()
+      announceNewBedDefenseDetections()
+    } else if (meta.name === 'map_chunk_bulk') {
+      observeBedDefenseBulk(data, bedDefense)
+      learnPregameBedDefenseTeams()
+      announceNewBedDefenseDetections()
+    }
     if (shouldRawForwardUpstreamPacket(meta.name)) return
 
     try {
       if (meta.name === 'login' || meta.name === 'respawn') {
         clearSessionEntityHistory(sessionState)
         trackLocalGameMode(data, sessionState)
+        if (meta.name === 'login') {
+          trackBlockHitLocalEntity(data, blockHitSound)
+          resetBedDefenseState(bedDefense)
+        }
+        resetBlockHitSoundState(blockHitSound)
         startTransferWatch()
         if (!isLiveBedWarsMatch(sessionState, splitReminderState)) {
           clearActiveRespawnTimers(true)
         }
+      }
+      if (meta.name === 'update_health') {
+        const playSound = observeBlockHitHealth(data, blockHitSound)
+        downstream.write(meta.name, data)
+        if (playSound) announceBlockHitSound()
+        return
+      }
+      if (meta.name === 'entity_status') {
+        const playSound = observeBlockHitEntityStatus(data, blockHitSound)
+        downstream.write(meta.name, data)
+        if (playSound) announceBlockHitSound()
+        return
+      }
+      if (meta.name === 'block_change') {
+        observeBedDefenseBlockChange(data, bedDefense)
+        downstream.write(meta.name, data)
+        announceNewBedDefenseDetections()
+        return
+      }
+      if (meta.name === 'multi_block_change') {
+        observeBedDefenseMultiBlockChange(data, bedDefense)
+        downstream.write(meta.name, data)
+        announceNewBedDefenseDetections()
+        return
       }
       if (meta.name === 'chat') {
         const raw = (data as any).message
@@ -3453,6 +3677,16 @@ function bridgePlay(
         }
         const gameStartedAtBeforeChat = splitReminderState.bedWarsGameStartedAt
         const gameEvent = bedWarsGameEvent(flattenChatToText(comp))
+        if (gameEvent === 'pregame' || isBedWarsPregameCountdown(flattenChatToText(comp))) {
+          bedDefensePregameActive = true
+          learnPregameBedDefenseTeams()
+        } else if (gameEvent === 'start') {
+          learnPregameBedDefenseTeams()
+          logPregameBedDefenseSnapshot()
+          bedDefensePregameActive = false
+        } else if (gameEvent === 'end') {
+          bedDefensePregameActive = false
+        }
         if (gameEvent === 'start' || gameEvent === 'end' || isBedWarsPregameCountdown(flattenChatToText(comp))) {
           allowBedWarsScoreboardRecovery = false
         }
@@ -3658,6 +3892,7 @@ function bridgePlay(
         trackScoreboardTeam(meta.name, data, sessionState, nicknames)
         recoverBedWarsStateFromScoreboard()
         analyzeScoreboard()
+        announceNewBedDefenseDetections()
         downstream.write(meta.name, withNicknameScoreboardTeam(downstreamTeamPacket, nicknames))
         const currentPlayers = typeof (data as any)?.team === 'string'
           ? Array.from(sessionState.teams.get((data as any).team)?.players || [])
@@ -3686,6 +3921,7 @@ function bridgePlay(
         }
         trackScoreboardDisplayObjective(data, sessionState)
         recoverBedWarsStateFromScoreboard()
+        announceNewBedDefenseDetections()
         downstream.write(meta.name, data)
         if (apolloNickname.configured) {
           refreshApolloNametags(downstream, sessionState, nicknames)
@@ -3697,6 +3933,7 @@ function bridgePlay(
         trackScoreboardScore(data, sessionState)
         recoverBedWarsStateFromScoreboard()
         analyzeScoreboard()
+        announceNewBedDefenseDetections()
         downstream.write(meta.name, withNicknameScoreboardScore(data, nicknames))
         if (typeof (data as any)?.itemName === 'string') {
           refreshApolloPlayers([(data as any).itemName])
@@ -3772,6 +4009,16 @@ function bridgePlay(
 
     if (downstream.state !== 'play' || upstream.state !== 'play') return
 
+    if (meta.name === 'position' || meta.name === 'position_look') {
+      trackBlockHitPosition(data, blockHitSound)
+    } else if (meta.name === 'block_place') {
+      trackSwordBlock(data, blockHitSound)
+    } else if (meta.name === 'block_dig' && Number((data as any)?.status) === 5) {
+      releaseSwordBlock(blockHitSound)
+    } else if (meta.name === 'held_item_slot') {
+      releaseSwordBlock(blockHitSound)
+    }
+
     if (meta.name === 'chat') {
       const message = String((data as any).message || '')
       const blockCommand = parseBlockListCommand(message)
@@ -3806,6 +4053,34 @@ function bridgePlay(
       if (/^\s*\/splitsound\s*$/i.test(message)) {
         splitSoundEventId += 1
         sendClientChat(downstream, { text: '[QoL] Split sound sent to the launcher.', color: 'yellow' })
+        return
+      }
+
+      if (/^\s*\/(?:obby|obsidian)\s*$/i.test(message)) {
+        if (!appConfig.bedWars.obsidianDetectorEnabled) {
+          sendClientChat(downstream, {
+            text: '[Obsidian] Detector is disabled. Enable it with /setting obby on.',
+            color: 'yellow'
+          })
+          return
+        }
+        if (!isLiveBedWarsMatch(sessionState, splitReminderState)) {
+          sendClientChat(downstream, {
+            text: '[Obsidian] Available only during a live Bed Wars match.',
+            color: 'gray'
+          })
+          return
+        }
+        const detections = bedDefenseDetections(bedDefense, activeBedWarsTeamColors(sessionState))
+        if (!detections.length) {
+          sendClientChat(downstream, {
+            text: '[Obsidian] No team with obsidian has been detected yet.',
+            color: 'gray'
+          })
+          return
+        }
+        sendClientChat(downstream, { text: '------- Obsidian Detector -------', color: 'dark_purple' })
+        for (const detection of detections) sendClientChat(downstream, bedDefenseChat(detection))
         return
       }
 
@@ -3975,6 +4250,9 @@ function bridgePlay(
     pendingRespawnDisconnectChecks.clear()
     respawnProfilesByPlayerKey.clear()
     syntheticRespawnPlayers.clear()
+    resetBlockHitSoundState(blockHitSound)
+    resetBedDefenseState(bedDefense)
+    activeBlockHitSoundTests.delete(testThisSessionBlockHitSound)
   }
 }
 
@@ -3988,6 +4266,7 @@ export const __test = {
   disconnectedWhileRespawningPlayerName,
   bedWarsTeamColorFromChatComponent,
   bedWarsMapNameFromScoreboard,
+  activeBedWarsTeamColors,
   blockedPlayerTeamContext,
   localTeammatesForBlockContext,
   currentBedWarsModeName,
@@ -4113,8 +4392,12 @@ export function startProxy(): Server {
     port: DASHBOARD_PORT,
     getStatus: dashboardStatus,
     getSplitSoundStatus: splitSoundStatus,
+    getBlockHitSoundStatus: blockHitSoundStatus,
     setRoute,
     setSplitReminderEnabled,
+    setBlockHitSoundEnabled,
+    setBlockHitSoundVolume,
+    testBlockHitSound,
     shutdown: () => shutdown('Shutdown requested from app.')
   })
   dashboardServer.on('error', error => {

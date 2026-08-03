@@ -118,7 +118,22 @@ These commands are handled locally by the proxy and are not sent to Hypixel:
 /nickname remove <player>
 /nickname list [page]
 /splitsound
+/obby
 ```
+
+Blockhit-ljudet är aktiverat som standard och spelar `mob.irongolem.hit` när du tar skada medan du blockerar med ett svärd. Det kan växlas lokalt med:
+
+```text
+/setting blockhit [on|off]
+```
+
+The Bed Wars obsidian detector announces when loaded world data confirms obsidian close to a team's bed. `/obby` lists the teams detected so far in the current live match. Toggle it with:
+
+```text
+/setting obby [on|off]
+```
+
+The detector only uses chunks sent to your Minecraft client. A distant base cannot be detected until its chunks have loaded, and the detector is disabled outside live Bed Wars matches and in replays.
 
 Settings and nicknames are stored under the local `state` directory.
 

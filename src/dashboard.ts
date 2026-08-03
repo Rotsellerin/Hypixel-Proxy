@@ -6,8 +6,12 @@ type ControlApiOptions = {
   port: number
   getStatus: () => unknown
   getSplitSoundStatus: () => unknown
+  getBlockHitSoundStatus: () => unknown
   setRoute: (routeId: string) => unknown
   setSplitReminderEnabled: (enabled: boolean) => unknown
+  setBlockHitSoundEnabled: (enabled: boolean) => unknown
+  setBlockHitSoundVolume: (volume: number) => unknown
+  testBlockHitSound: () => unknown
   shutdown: () => unknown
 }
 
@@ -64,6 +68,11 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, opts: Contro
     return
   }
 
+  if (req.method === 'GET' && pathname === '/api/blockhit-sound/events') {
+    sendJson(res, 200, opts.getBlockHitSoundStatus())
+    return
+  }
+
   if (req.method === 'POST' && pathname === '/api/route') {
     const body = await readJson(req)
     sendJson(res, 200, opts.setRoute(String(body.routeId || body.route || 'direct')))
@@ -77,6 +86,25 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, opts: Contro
       return
     }
     sendJson(res, 400, { error: 'Expected enabled.' })
+    return
+  }
+
+  if (req.method === 'POST' && pathname === '/api/blockhit-sound') {
+    const body = await readJson(req)
+    if (typeof body.enabled === 'boolean') {
+      sendJson(res, 200, opts.setBlockHitSoundEnabled(body.enabled))
+      return
+    }
+    if (typeof body.volume === 'number' && Number.isFinite(body.volume)) {
+      sendJson(res, 200, opts.setBlockHitSoundVolume(body.volume))
+      return
+    }
+    sendJson(res, 400, { error: 'Expected enabled or volume.' })
+    return
+  }
+
+  if (req.method === 'POST' && pathname === '/api/blockhit-sound/test') {
+    sendJson(res, 200, opts.testBlockHitSound())
     return
   }
 

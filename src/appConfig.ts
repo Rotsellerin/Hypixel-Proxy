@@ -21,11 +21,18 @@ export type SplitReminderSettings = {
 
 export type BedWarsSettings = {
   respawnTimerEnabled: boolean
+  obsidianDetectorEnabled: boolean
+}
+
+export type QolSettings = {
+  blockHitSoundEnabled: boolean
+  blockHitSoundVolume: number
 }
 
 export type AppConfig = {
   routeId: RouteId
   bedWars: BedWarsSettings
+  qol: QolSettings
   splitReminder: SplitReminderSettings
 }
 
@@ -88,7 +95,12 @@ export function defaultAppConfig(): AppConfig {
   return {
     routeId: 'direct',
     bedWars: {
-      respawnTimerEnabled: true
+      respawnTimerEnabled: true,
+      obsidianDetectorEnabled: true
+    },
+    qol: {
+      blockHitSoundEnabled: true,
+      blockHitSoundVolume: 50
     },
     splitReminder: { ...DEFAULT_SPLIT_REMINDER }
   }
@@ -147,12 +159,26 @@ export function normalizeAppConfig(value: unknown): AppConfig {
   const rawBedWars = raw.bedWars && typeof raw.bedWars === 'object'
     ? raw.bedWars as Record<string, unknown>
     : {}
+  const rawQol = raw.qol && typeof raw.qol === 'object'
+    ? raw.qol as Record<string, unknown>
+    : {}
   return {
     routeId: normalizeRouteId(raw.routeId),
     bedWars: {
       respawnTimerEnabled: typeof rawBedWars.respawnTimerEnabled === 'boolean'
         ? rawBedWars.respawnTimerEnabled
+        : true,
+      obsidianDetectorEnabled: typeof rawBedWars.obsidianDetectorEnabled === 'boolean'
+        ? rawBedWars.obsidianDetectorEnabled
         : true
+    },
+    qol: {
+      blockHitSoundEnabled: typeof rawQol.blockHitSoundEnabled === 'boolean'
+        ? rawQol.blockHitSoundEnabled
+        : true,
+      blockHitSoundVolume: typeof rawQol.blockHitSoundVolume === 'number' && Number.isFinite(rawQol.blockHitSoundVolume)
+        ? Math.max(0, Math.min(100, Math.round(rawQol.blockHitSoundVolume)))
+        : 50
     },
     splitReminder: normalizeSplitReminderSettings(raw.splitReminder)
   }
