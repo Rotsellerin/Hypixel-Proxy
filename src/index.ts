@@ -230,7 +230,9 @@ const BEDWARS_LEGACY_CHAT_TEAM_FORMAT: Record<string, string> = {
 const LOBBY_COMMAND_DEDUPE_MS = 2500
 const RAW_FORWARD_UPSTREAM_PACKETS = new Set(['map_chunk', 'map_chunk_bulk'])
 const BED_DEFENSE_SCAN_DELAY_MS = 50
-const BED_DEFENSE_MAX_PENDING_CHUNKS = 96
+const BED_DEFENSE_MAP_LOG_SETTLE_MS = 1500
+const BED_DEFENSE_MAX_PENDING_CHUNKS = 512
+const BED_DEFENSE_MAX_UNARMED_CHUNKS = 512
 const TRANSFER_WATCH_MS = 20000
 const SCOREBOARD_ANALYSIS_THROTTLE_MS = 500
 const SPLIT_TITLE_FADE_IN_TICKS = 0
@@ -3285,9 +3287,12 @@ function bridgePlay(
   const bedDefense = createBedDefenseState()
   const pendingHeldItemsByEntityId = new Map<number, any>()
   const pendingBedDefenseChunks = new Map<string, BedDefenseChunkPacket>()
+  const unarmedBedDefenseChunks = new Map<string, BedDefenseChunkPacket>()
   let bedDefenseScanScheduled = false
   let bedDefenseChunkScanningArmed = false
   let bedDefenseWorldGeneration = 0
+  let lastBedDefenseMappedSignature = ''
+  let bedDefenseMapLogTimer: NodeJS.Timeout | null = null
   let bridgeClosed = false
   let lastLobbyCommandKey = ''
   let lastLobbyCommandAt = 0
@@ -3377,6 +3382,24 @@ function bridgePlay(
   const invalidateBedDefenseChunkQueue = () => {
     bedDefenseWorldGeneration += 1
     pendingBedDefenseChunks.clear()
+    unarmedBedDefenseChunks.clear()
+    if (bedDefenseMapLogTimer) clearTimeout(bedDefenseMapLogTimer)
+    bedDefenseMapLogTimer = null
+  }
+
+  const rememberBoundedBedDefenseChunks = (
+    target: Map<string, BedDefenseChunkPacket>,
+    packets: BedDefenseChunkPacket[],
+    limit: number
+  ) => {
+    for (const packet of packets) {
+      const key = `${packet.x},${packet.z}`
+      if (!target.has(key) && target.size >= limit) {
+        const oldestKey = target.keys().next().value
+        if (typeof oldestKey === 'string') target.delete(oldestKey)
+      }
+      target.set(key, packet)
+    }
   }
 
   const scheduleBedDefenseChunkScan = () => {
@@ -3391,18 +3414,55 @@ function bridgePlay(
     if (
       !appConfig.bedWars.obsidianDetectorEnabled
       || !baseObsidianDetectorEnabled()
-      || !bedDefenseChunkScanningArmed
       || bridgeClosed
     ) return
-    for (const packet of packets) {
-      const key = `${packet.x},${packet.z}`
-      if (!pendingBedDefenseChunks.has(key) && pendingBedDefenseChunks.size >= BED_DEFENSE_MAX_PENDING_CHUNKS) {
-        const oldestKey = pendingBedDefenseChunks.keys().next().value
-        if (typeof oldestKey === 'string') pendingBedDefenseChunks.delete(oldestKey)
-      }
-      pendingBedDefenseChunks.set(key, packet)
+    if (bedDefenseMapLogTimer) clearTimeout(bedDefenseMapLogTimer)
+    bedDefenseMapLogTimer = null
+    if (!bedDefenseChunkScanningArmed) {
+      rememberBoundedBedDefenseChunks(
+        unarmedBedDefenseChunks,
+        packets,
+        BED_DEFENSE_MAX_UNARMED_CHUNKS
+      )
+      return
     }
+    rememberBoundedBedDefenseChunks(
+      pendingBedDefenseChunks,
+      packets,
+      BED_DEFENSE_MAX_PENDING_CHUNKS
+    )
     scheduleBedDefenseChunkScan()
+  }
+
+  const armBedDefenseChunkScanning = () => {
+    if (bedDefenseChunkScanningArmed) return
+    bedDefenseChunkScanningArmed = true
+    const cached = Array.from(unarmedBedDefenseChunks.values())
+    unarmedBedDefenseChunks.clear()
+    term('QoL', `Base detector activated (${cached.length} cached chunk(s)).`, colors.magenta)
+    if (cached.length) queueBedDefenseChunks(cached)
+  }
+
+  const logMappedBedDefenseBases = () => {
+    const mappedTeams = Array.from(new Set(bedDefense.teamByBedKey.values())).sort()
+    if (!mappedTeams.length) return
+    const signature = mappedTeams.join(',')
+    if (signature === lastBedDefenseMappedSignature) return
+    lastBedDefenseMappedSignature = signature
+    term(
+      'QoL',
+      `Base detector mapped ${mappedTeams.length} base(s) (${bedDefense.teamByBedKey.size} bed blocks, ${mappedTeams.length} team(s) identified).`,
+      colors.magenta
+    )
+  }
+
+  const scheduleMappedBedDefenseLog = () => {
+    if (bedDefenseMapLogTimer) clearTimeout(bedDefenseMapLogTimer)
+    bedDefenseMapLogTimer = setTimeout(() => {
+      bedDefenseMapLogTimer = null
+      if (!bridgeClosed && !pendingBedDefenseChunks.size) logMappedBedDefenseBases()
+    }, BED_DEFENSE_MAP_LOG_SETTLE_MS)
+    bedDefenseMapLogTimer.unref?.()
   }
 
   const scanNextBedDefenseChunk = (generation: number) => {
@@ -3413,20 +3473,24 @@ function bridgePlay(
       return
     }
     const next = pendingBedDefenseChunks.entries().next()
-    if (next.done) return
+    if (next.done) {
+      scheduleMappedBedDefenseLog()
+      return
+    }
     const [key, packet] = next.value
     pendingBedDefenseChunks.delete(key)
     observeBedDefenseChunk(packet, bedDefense)
     // Learn clean base ownership even during pregame, before player wool is placed.
     bedDefenseDetections(bedDefense)
     announceBaseObsidianDetections()
-    scheduleBedDefenseChunkScan()
+    if (pendingBedDefenseChunks.size) scheduleBedDefenseChunkScan()
+    else scheduleMappedBedDefenseLog()
   }
 
   const analyzeScoreboard = (force = false) => {
     const detectedMap = bedWarsMapNameFromScoreboard(sessionState)
     if (detectedMap) lastBedWarsMapName = detectedMap
-    if (isBedDefenseScoreboardContext(sessionState)) bedDefenseChunkScanningArmed = true
+    if (isBedDefenseScoreboardContext(sessionState)) armBedDefenseChunkScanning()
     if (!appConfig.splitReminder.enabled) return
     if (isTransferActive()) {
       scoreboardAnalysisDeferred = true
@@ -3659,6 +3723,7 @@ function bridgePlay(
     clearActiveRespawnTimers(false)
     resetObsidianDetectorState(obsidianDetector)
     resetBedDefenseState(bedDefense)
+    lastBedDefenseMappedSignature = ''
     invalidateBedDefenseChunkQueue()
     pruneSessionHistory(sessionState, { clearEntities: true })
     resetSplitReminderMatchState(splitReminderState, false)
@@ -3727,6 +3792,7 @@ function bridgePlay(
           trackBlockHitLocalEntity(data, blockHitSound)
           resetObsidianDetectorState(obsidianDetector)
           resetBedDefenseState(bedDefense)
+          lastBedDefenseMappedSignature = ''
         }
         resetBlockHitSoundState(blockHitSound)
         startTransferWatch()
@@ -3794,7 +3860,7 @@ function bridgePlay(
         }
         const gameStartedAtBeforeChat = splitReminderState.bedWarsGameStartedAt
         const gameEvent = bedWarsGameEvent(flattenChatToText(comp))
-        if (gameEvent === 'start' || gameEvent === 'pregame') bedDefenseChunkScanningArmed = true
+        if (gameEvent === 'start' || gameEvent === 'pregame') armBedDefenseChunkScanning()
         if (gameEvent === 'end') {
           bedDefenseChunkScanningArmed = false
           invalidateBedDefenseChunkQueue()
