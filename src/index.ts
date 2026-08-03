@@ -229,6 +229,8 @@ const BEDWARS_LEGACY_CHAT_TEAM_FORMAT: Record<string, string> = {
 }
 const LOBBY_COMMAND_DEDUPE_MS = 2500
 const RAW_FORWARD_UPSTREAM_PACKETS = new Set(['map_chunk', 'map_chunk_bulk'])
+const BED_DEFENSE_SCAN_DELAY_MS = 50
+const BED_DEFENSE_MAX_PENDING_CHUNKS = 96
 const TRANSFER_WATCH_MS = 20000
 const SCOREBOARD_ANALYSIS_THROTTLE_MS = 500
 const SPLIT_TITLE_FADE_IN_TICKS = 0
@@ -3285,6 +3287,7 @@ function bridgePlay(
   const pendingBedDefenseChunks = new Map<string, BedDefenseChunkPacket>()
   let bedDefenseScanScheduled = false
   let bedDefenseChunkScanningArmed = false
+  let bedDefenseWorldGeneration = 0
   let bridgeClosed = false
   let lastLobbyCommandKey = ''
   let lastLobbyCommandAt = 0
@@ -3371,6 +3374,19 @@ function bridgePlay(
   const heldObsidianDetectorEnabled = () => appConfig.bedWars.obsidianDetectorMode !== 'base'
   const baseObsidianDetectorEnabled = () => appConfig.bedWars.obsidianDetectorMode !== 'held'
 
+  const invalidateBedDefenseChunkQueue = () => {
+    bedDefenseWorldGeneration += 1
+    pendingBedDefenseChunks.clear()
+  }
+
+  const scheduleBedDefenseChunkScan = () => {
+    if (bedDefenseScanScheduled || !pendingBedDefenseChunks.size || bridgeClosed) return
+    const generation = bedDefenseWorldGeneration
+    bedDefenseScanScheduled = true
+    const timer = setTimeout(() => scanNextBedDefenseChunk(generation), BED_DEFENSE_SCAN_DELAY_MS)
+    timer.unref?.()
+  }
+
   const queueBedDefenseChunks = (packets: BedDefenseChunkPacket[]) => {
     if (
       !appConfig.bedWars.obsidianDetectorEnabled
@@ -3378,16 +3394,22 @@ function bridgePlay(
       || !bedDefenseChunkScanningArmed
       || bridgeClosed
     ) return
-    for (const packet of packets) pendingBedDefenseChunks.set(`${packet.x},${packet.z}`, packet)
-    if (bedDefenseScanScheduled || !pendingBedDefenseChunks.size) return
-    bedDefenseScanScheduled = true
-    setImmediate(scanNextBedDefenseChunk)
+    for (const packet of packets) {
+      const key = `${packet.x},${packet.z}`
+      if (!pendingBedDefenseChunks.has(key) && pendingBedDefenseChunks.size >= BED_DEFENSE_MAX_PENDING_CHUNKS) {
+        const oldestKey = pendingBedDefenseChunks.keys().next().value
+        if (typeof oldestKey === 'string') pendingBedDefenseChunks.delete(oldestKey)
+      }
+      pendingBedDefenseChunks.set(key, packet)
+    }
+    scheduleBedDefenseChunkScan()
   }
 
-  const scanNextBedDefenseChunk = () => {
+  const scanNextBedDefenseChunk = (generation: number) => {
     bedDefenseScanScheduled = false
-    if (bridgeClosed || !bedDefenseChunkScanningArmed) {
-      pendingBedDefenseChunks.clear()
+    if (bridgeClosed || !bedDefenseChunkScanningArmed || generation !== bedDefenseWorldGeneration) {
+      if (bridgeClosed || !bedDefenseChunkScanningArmed) pendingBedDefenseChunks.clear()
+      else scheduleBedDefenseChunkScan()
       return
     }
     const next = pendingBedDefenseChunks.entries().next()
@@ -3398,10 +3420,7 @@ function bridgePlay(
     // Learn clean base ownership even during pregame, before player wool is placed.
     bedDefenseDetections(bedDefense)
     announceBaseObsidianDetections()
-    if (pendingBedDefenseChunks.size) {
-      bedDefenseScanScheduled = true
-      setImmediate(scanNextBedDefenseChunk)
-    }
+    scheduleBedDefenseChunkScan()
   }
 
   const analyzeScoreboard = (force = false) => {
@@ -3525,7 +3544,7 @@ function bridgePlay(
     // each base, but any obsidian present in that snapshot is map data rather
     // than a player-placed defense. Only live-match updates may count.
     clearBedDefenseObsidian(bedDefense)
-    pendingBedDefenseChunks.clear()
+    invalidateBedDefenseChunkQueue()
 
     // The transfer guard should not hide the new match roster for 20 seconds.
     transferWatch.active = false
@@ -3640,7 +3659,7 @@ function bridgePlay(
     clearActiveRespawnTimers(false)
     resetObsidianDetectorState(obsidianDetector)
     resetBedDefenseState(bedDefense)
-    pendingBedDefenseChunks.clear()
+    invalidateBedDefenseChunkQueue()
     pruneSessionHistory(sessionState, { clearEntities: true })
     resetSplitReminderMatchState(splitReminderState, false)
     allowBedWarsScoreboardRecovery = true
@@ -3703,7 +3722,7 @@ function bridgePlay(
         clearSessionEntityHistory(sessionState)
         trackLocalGameMode(data, sessionState)
         bedDefenseChunkScanningArmed = false
-        pendingBedDefenseChunks.clear()
+        invalidateBedDefenseChunkQueue()
         if (meta.name === 'login') {
           trackBlockHitLocalEntity(data, blockHitSound)
           resetObsidianDetectorState(obsidianDetector)
@@ -3778,7 +3797,7 @@ function bridgePlay(
         if (gameEvent === 'start' || gameEvent === 'pregame') bedDefenseChunkScanningArmed = true
         if (gameEvent === 'end') {
           bedDefenseChunkScanningArmed = false
-          pendingBedDefenseChunks.clear()
+          invalidateBedDefenseChunkQueue()
         }
         if (gameEvent === 'start') resetObsidianDetectorState(obsidianDetector)
         if (gameEvent === 'start' || gameEvent === 'end' || isBedWarsPregameCountdown(flattenChatToText(comp))) {
@@ -4213,7 +4232,7 @@ function bridgePlay(
             obsidianDetectorMode: requestedMode
           }
         })
-        if (requestedMode === 'held') pendingBedDefenseChunks.clear()
+        if (requestedMode === 'held') invalidateBedDefenseChunkQueue()
         term('Settings', `Obsidian detector mode: ${previousMode} -> ${requestedMode}.`, colors.yellow)
         sendClientChat(downstream, {
           text: `[Obsidian] Detector mode changed from ${previousMode} to ${requestedMode}.`,
@@ -4384,7 +4403,7 @@ function bridgePlay(
 
   return () => {
     bridgeClosed = true
-    pendingBedDefenseChunks.clear()
+    invalidateBedDefenseChunkQueue()
     clearInterval(respawnTimerInterval)
     clearRespawnTimers(respawnTimers)
     pendingRespawnDisconnectChecks.clear()
